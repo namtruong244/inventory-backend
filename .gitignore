@@ -1,0 +1,40 @@
+# Binaries
+bin/
+bootstrap
+*.zip
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+*.prof
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Environment variables
+.env
+
+# Uploads
+uploads/*
+!uploads/.gitkeep
+uploads/items/*
+!uploads/items/.gitkeep
+uploads/receipts/*
+!uploads/receipts/.gitkeep
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
