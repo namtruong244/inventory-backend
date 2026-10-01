@@ -29,6 +29,8 @@ type ScanItemPayload struct {
 	Name       string    `json:"name"`
 	BoxID      uuid.UUID `json:"boxId"`
 	Quantity   float64   `json:"quantity"`
+	Status     string    `json:"status"`
+	Barcode    *string   `json:"barcode,omitempty"`
 	IsLowStock bool      `json:"isLowStock"`
 }
 
@@ -75,6 +77,8 @@ func (s *scanService) Lookup(userID uuid.UUID, code string) (*ScanLookupResult, 
 				Name:       item.Name,
 				BoxID:      item.BoxID,
 				Quantity:   item.Quantity,
+				Status:     item.Status,
+				Barcode:    item.Barcode,
 				IsLowStock: item.IsLowStock,
 			},
 		}, nil

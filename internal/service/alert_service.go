@@ -16,12 +16,17 @@ type AlertService interface {
 }
 
 type AlertSummaryResponse struct {
+	TotalAlerts           int `json:"totalAlerts"`
+	OverdueCount          int `json:"overdueCount"`
+	ExpiredCount          int `json:"expiredCount"`
+	ExpiringSoonCount     int `json:"expiringSoonCount"`
+	LowStockCount         int `json:"lowStockCount"`
+	ExpiringWarrantyCount int `json:"expiringWarrantyCount"`
+
+	// Backward compatibility aliases
 	TotalAlertCount     int `json:"totalAlertCount"`
-	ExpiredCount        int `json:"expiredCount"`
-	ExpiringSoonCount   int `json:"expiringSoonCount"`
-	WarrantyEndingCount int `json:"warrantyEndingCount"`
 	OverdueLoansCount   int `json:"overdueLoansCount"`
-	LowStockCount       int `json:"lowStockCount"`
+	WarrantyEndingCount int `json:"warrantyEndingCount"`
 }
 
 type AlertAllResponse struct {
@@ -85,12 +90,17 @@ func (s *alertService) GetSummary(userID uuid.UUID) (*AlertSummaryResponse, erro
 	totalAlerts := int(expiredCount + expiringSoonCount + warrantyEndingCount + overdueLoansCount + lowStockCount)
 
 	return &AlertSummaryResponse{
+		TotalAlerts:           totalAlerts,
+		OverdueCount:          int(overdueLoansCount),
+		ExpiredCount:          int(expiredCount),
+		ExpiringSoonCount:     int(expiringSoonCount),
+		LowStockCount:         int(lowStockCount),
+		ExpiringWarrantyCount: int(warrantyEndingCount),
+
+		// Backward compatibility
 		TotalAlertCount:     totalAlerts,
-		ExpiredCount:        int(expiredCount),
-		ExpiringSoonCount:   int(expiringSoonCount),
-		WarrantyEndingCount: int(warrantyEndingCount),
 		OverdueLoansCount:   int(overdueLoansCount),
-		LowStockCount:       int(lowStockCount),
+		WarrantyEndingCount: int(warrantyEndingCount),
 	}, nil
 }
 

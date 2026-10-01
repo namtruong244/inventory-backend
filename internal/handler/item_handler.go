@@ -26,7 +26,7 @@ type MoveItemRequest struct {
 }
 
 type UpdateQuantityRequest struct {
-	Quantity float64 `json:"quantity" binding:"required"`
+	Quantity *float64 `json:"quantity" binding:"required,gte=0"`
 }
 
 func (h *ItemHandler) List(c *gin.Context) {
@@ -212,13 +212,13 @@ func (h *ItemHandler) UpdateQuantity(c *gin.Context) {
 		return
 	}
 
-	err = h.itemService.UpdateQuantity(userID, id, req.Quantity)
+	err = h.itemService.UpdateQuantity(userID, id, *req.Quantity)
 	if err != nil {
 		SendError(c, http.StatusBadRequest, "UPDATE_QUANTITY_FAILED", err.Error(), nil)
 		return
 	}
 
-	SendSuccess(c, http.StatusOK, gin.H{"id": id, "quantity": req.Quantity}, "Quantity updated successfully")
+	SendSuccess(c, http.StatusOK, gin.H{"id": id, "quantity": *req.Quantity}, "Quantity updated successfully")
 }
 
 func (h *ItemHandler) Delete(c *gin.Context) {

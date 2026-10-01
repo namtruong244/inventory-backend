@@ -14,6 +14,8 @@ import (
 type AuthService interface {
 	Register(name, email, password string) (*AuthResult, error)
 	Login(email, password string) (*AuthResult, error)
+	LoginWithGoogle(email, name string, avatarURL *string) (*AuthResult, error)
+	LoginWithApple(email, name string) (*AuthResult, error)
 	GetProfile(userID uuid.UUID) (*models.User, error)
 }
 
@@ -28,6 +30,7 @@ type UserResponse struct {
 	Email     string    `json:"email"`
 	Role      string    `json:"role"`
 	AvatarURL *string   `json:"avatarUrl,omitempty"`
+	Provider  string    `json:"provider,omitempty"`
 }
 
 type authService struct {
@@ -63,7 +66,8 @@ func (s *authService) Register(name, email, password string) (*AuthResult, error
 	user := &models.User{
 		Name:         name,
 		Email:        email,
-		PasswordHash: hashedPassword,
+		PasswordHash: &hashedPassword,
+		Provider:     "local",
 		Role:         "Owner",
 	}
 
@@ -97,6 +101,7 @@ func (s *authService) Register(name, email, password string) (*AuthResult, error
 			Email:     user.Email,
 			Role:      user.Role,
 			AvatarURL: user.AvatarURL,
+			Provider:  user.Provider,
 		},
 	}, nil
 }
@@ -107,7 +112,7 @@ func (s *authService) Login(email, password string) (*AuthResult, error) {
 		return nil, errors.New("invalid email or password")
 	}
 
-	if !utils.CheckPasswordHash(password, user.PasswordHash) {
+	if user.PasswordHash == nil || *user.PasswordHash == "" || !utils.CheckPasswordHash(password, *user.PasswordHash) {
 		return nil, errors.New("invalid email or password")
 	}
 
@@ -124,6 +129,130 @@ func (s *authService) Login(email, password string) (*AuthResult, error) {
 			Email:     user.Email,
 			Role:      user.Role,
 			AvatarURL: user.AvatarURL,
+			Provider:  user.Provider,
+		},
+	}, nil
+}
+
+func (s *authService) LoginWithGoogle(email, name string, avatarURL *string) (*AuthResult, error) {
+	if email == "" || name == "" {
+		return nil, errors.New("email and name are required")
+	}
+
+	user, _ := s.userRepo.GetByEmail(email)
+	if user != nil {
+		// Existing user
+		if avatarURL != nil && *avatarURL != "" {
+			user.AvatarURL = avatarURL
+		}
+		if user.Name == "" {
+			user.Name = name
+		}
+		user.Provider = "google"
+		if err := s.userRepo.Update(user); err != nil {
+			return nil, err
+		}
+	} else {
+		// New user
+		user = &models.User{
+			Name:         name,
+			Email:        email,
+			Provider:     "google",
+			Role:         "Owner",
+			AvatarURL:    avatarURL,
+			PasswordHash: nil,
+		}
+		if err := s.userRepo.Create(user); err != nil {
+			return nil, err
+		}
+
+		_ = s.settingsRepo.Create(&models.UserSettings{
+			UserID:            user.ID,
+			CurrencySymbol:    "$",
+			DefaultUnit:       "pcs",
+			ExpiryWarningDays: 30,
+			NotifyExpiring:    true,
+			NotifyOverdue:     true,
+			NotifyLowStock:    true,
+			VibrateOnScan:     true,
+			AutoOpenOnScan:    true,
+		})
+	}
+
+	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuthResult{
+		Token: token,
+		User: UserResponse{
+			ID:        user.ID,
+			Name:      user.Name,
+			Email:     user.Email,
+			Role:      user.Role,
+			AvatarURL: user.AvatarURL,
+			Provider:  user.Provider,
+		},
+	}, nil
+}
+
+func (s *authService) LoginWithApple(email, name string) (*AuthResult, error) {
+	if email == "" {
+		return nil, errors.New("email is required")
+	}
+	if name == "" {
+		name = "Apple User"
+	}
+
+	user, _ := s.userRepo.GetByEmail(email)
+	if user != nil {
+		user.Provider = "apple"
+		if user.Name == "" || user.Name == "Apple User" {
+			user.Name = name
+		}
+		if err := s.userRepo.Update(user); err != nil {
+			return nil, err
+		}
+	} else {
+		user = &models.User{
+			Name:         name,
+			Email:        email,
+			Provider:     "apple",
+			Role:         "Owner",
+			PasswordHash: nil,
+		}
+		if err := s.userRepo.Create(user); err != nil {
+			return nil, err
+		}
+
+		_ = s.settingsRepo.Create(&models.UserSettings{
+			UserID:            user.ID,
+			CurrencySymbol:    "$",
+			DefaultUnit:       "pcs",
+			ExpiryWarningDays: 30,
+			NotifyExpiring:    true,
+			NotifyOverdue:     true,
+			NotifyLowStock:    true,
+			VibrateOnScan:     true,
+			AutoOpenOnScan:    true,
+		})
+	}
+
+	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuthResult{
+		Token: token,
+		User: UserResponse{
+			ID:        user.ID,
+			Name:      user.Name,
+			Email:     user.Email,
+			Role:      user.Role,
+			AvatarURL: user.AvatarURL,
+			Provider:  user.Provider,
 		},
 	}, nil
 }

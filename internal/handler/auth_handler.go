@@ -28,6 +28,18 @@ type LoginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+type GoogleLoginRequest struct {
+	Email     string  `json:"email" binding:"required,email"`
+	Name      string  `json:"name" binding:"required"`
+	AvatarURL *string `json:"avatar_url"`
+	AvatarUrl *string `json:"avatarUrl"`
+}
+
+type AppleLoginRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Name  string `json:"name" binding:"required"`
+}
+
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -60,6 +72,43 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	SendSuccess(c, http.StatusOK, result, "Login successful")
 }
 
+func (h *AuthHandler) GoogleLogin(c *gin.Context) {
+	var req GoogleLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SendError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error(), nil)
+		return
+	}
+
+	avatarURL := req.AvatarURL
+	if avatarURL == nil && req.AvatarUrl != nil {
+		avatarURL = req.AvatarUrl
+	}
+
+	result, err := h.authService.LoginWithGoogle(req.Email, req.Name, avatarURL)
+	if err != nil {
+		SendError(c, http.StatusBadRequest, "AUTH_FAILED", err.Error(), nil)
+		return
+	}
+
+	SendSuccess(c, http.StatusOK, result, "Google authentication successful")
+}
+
+func (h *AuthHandler) AppleLogin(c *gin.Context) {
+	var req AppleLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SendError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error(), nil)
+		return
+	}
+
+	result, err := h.authService.LoginWithApple(req.Email, req.Name)
+	if err != nil {
+		SendError(c, http.StatusBadRequest, "AUTH_FAILED", err.Error(), nil)
+		return
+	}
+
+	SendSuccess(c, http.StatusOK, result, "Apple authentication successful")
+}
+
 func (h *AuthHandler) Me(c *gin.Context) {
 	userID, ok := middleware.GetCurrentUserID(c)
 	if !ok {
@@ -79,5 +128,6 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		Email:     user.Email,
 		Role:      user.Role,
 		AvatarURL: user.AvatarURL,
+		Provider:  user.Provider,
 	}, "")
 }

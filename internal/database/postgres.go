@@ -58,6 +58,21 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			return nil, fmt.Errorf("database migration failed: %w", err)
 		}
 
+		// Ensure nullable password_hash and columns for social login
+		_ = db.Exec("ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;").Error
+		_ = db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider VARCHAR(50) DEFAULT 'local';").Error
+		_ = db.Exec("ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_id VARCHAR(255) NULL;").Error
+
+		// Create performance and GIN indexes
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_boxes_user_parent ON boxes(user_id, parent_id);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_boxes_label ON boxes(label);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_items_user_box ON items(user_id, box_id);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_items_barcode ON items(barcode);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_items_serial ON items(serial_number);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_items_custom_attributes ON items USING gin (custom_attributes);").Error
+		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_lending_active ON lending_records(user_id, actual_return_date);").Error
+
 		// Seed system defaults
 		if err := SeedDefaultCategories(db); err != nil {
 			log.Printf("Warning: Seeding default categories failed: %v\n", err)
