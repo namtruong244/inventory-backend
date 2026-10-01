@@ -22,14 +22,23 @@ type ApiErrorResponse struct {
 
 // 1. Social Auth Requests
 type GoogleLoginRequest struct {
-	Email     string  `json:"email" binding:"required,email"`
-	Name      string  `json:"name" binding:"required"`
-	AvatarURL *string `json:"avatar_url"`
+	Email        string  `json:"email" binding:"required,email"`
+	Name         string  `json:"name" binding:"required"`
+	AvatarURL    *string `json:"avatar_url"`
+	AvatarUrl    *string `json:"avatarUrl"`
+	IDToken      *string `json:"id_token"`
+	IdToken      *string `json:"idToken"`
+	AccessToken  *string `json:"access_token"`
+	AccessTokenCamel *string `json:"accessToken"`
 }
 
 type AppleLoginRequest struct {
-	Email string `json:"email" binding:"required,email"`
-	Name  string `json:"name" binding:"required"`
+	Email             string  `json:"email" binding:"required,email"`
+	Name              string  `json:"name" binding:"required"`
+	IdentityToken     *string `json:"identity_token"`
+	IdentityTokenCamel *string `json:"identityToken"`
+	AuthorizationCode *string `json:"authorization_code"`
+	AuthorizationCodeCamel *string `json:"authorizationCode"`
 }
 
 type AuthResponseData struct {

@@ -32,6 +32,10 @@ type Config struct {
 	R2SecretAccessKey string
 	R2BucketName      string
 	R2PublicURL       string
+
+	// OAuth & Social Auth
+	GoogleClientID string
+	AppleClientID  string
 }
 
 func LoadConfig() *Config {
@@ -79,6 +83,8 @@ func LoadConfig() *Config {
 		R2SecretAccessKey:  getEnv("R2_SECRET_ACCESS_KEY", ""),
 		R2BucketName:       getEnv("R2_BUCKET_NAME", ""),
 		R2PublicURL:        getEnv("R2_PUBLIC_URL", ""),
+		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", "1059613381730-sbh1t9581ud40drbiu8ssh7fj1e3ahev.apps.googleusercontent.com"),
+		AppleClientID:      getEnv("APPLE_CLIENT_ID", "com.namtruong244.inventory"),
 	}
 }
 

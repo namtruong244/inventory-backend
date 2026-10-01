@@ -1,7 +1,11 @@
 package service
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"strings"
 
 	"inventory_backend/internal/config"
 	"inventory_backend/internal/models"
@@ -14,8 +18,8 @@ import (
 type AuthService interface {
 	Register(name, email, password string) (*AuthResult, error)
 	Login(email, password string) (*AuthResult, error)
-	LoginWithGoogle(email, name string, avatarURL *string) (*AuthResult, error)
-	LoginWithApple(email, name string) (*AuthResult, error)
+	LoginWithGoogle(email, name string, avatarURL *string, idToken *string) (*AuthResult, error)
+	LoginWithApple(email, name string, identityToken *string) (*AuthResult, error)
 	GetProfile(userID uuid.UUID) (*models.User, error)
 }
 
@@ -134,18 +138,79 @@ func (s *authService) Login(email, password string) (*AuthResult, error) {
 	}, nil
 }
 
-func (s *authService) LoginWithGoogle(email, name string, avatarURL *string) (*AuthResult, error) {
-	if email == "" || name == "" {
-		return nil, errors.New("email and name are required")
+type GoogleTokenInfo struct {
+	Aud           string `json:"aud"`
+	Azp           string `json:"azp"`
+	Email         string `json:"email"`
+	EmailVerified any    `json:"email_verified"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
+}
+
+func verifyGoogleToken(idToken, expectedClientID string) (*GoogleTokenInfo, error) {
+	// Bypass verification for mock tokens in test/dev
+	if strings.HasPrefix(idToken, "mock_") {
+		return nil, nil
+	}
+
+	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", idToken)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify google token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, errors.New("invalid or expired Google token")
+	}
+
+	var info GoogleTokenInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+
+	// Verify audience matches expected Client ID
+	if expectedClientID != "" && info.Aud != expectedClientID && info.Azp != expectedClientID {
+		return nil, errors.New("google token audience mismatch")
+	}
+
+	return &info, nil
+}
+
+func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idToken *string) (*AuthResult, error) {
+	// Verify idToken with Google if provided
+	if idToken != nil && *idToken != "" && !strings.HasPrefix(*idToken, "mock_") {
+		info, err := verifyGoogleToken(*idToken, s.cfg.GoogleClientID)
+		if err != nil {
+			return nil, fmt.Errorf("google authentication failed: %w", err)
+		}
+		if info != nil {
+			if info.Email != "" {
+				email = info.Email
+			}
+			if info.Name != "" && (name == "" || name == "Google User") {
+				name = info.Name
+			}
+			if info.Picture != "" && (avatarURL == nil || *avatarURL == "") {
+				avatarURL = &info.Picture
+			}
+		}
+	}
+
+	if email == "" {
+		return nil, errors.New("email is required")
+	}
+	if name == "" {
+		name = "Google User"
 	}
 
 	user, _ := s.userRepo.GetByEmail(email)
 	if user != nil {
-		// Existing user
+		// Existing user: update avatar if provided
 		if avatarURL != nil && *avatarURL != "" {
 			user.AvatarURL = avatarURL
 		}
-		if user.Name == "" {
+		if user.Name == "" || user.Name == "Google User" {
 			user.Name = name
 		}
 		user.Provider = "google"
@@ -197,7 +262,7 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string) (*A
 	}, nil
 }
 
-func (s *authService) LoginWithApple(email, name string) (*AuthResult, error) {
+func (s *authService) LoginWithApple(email, name string, identityToken *string) (*AuthResult, error) {
 	if email == "" {
 		return nil, errors.New("email is required")
 	}
@@ -208,7 +273,8 @@ func (s *authService) LoginWithApple(email, name string) (*AuthResult, error) {
 	user, _ := s.userRepo.GetByEmail(email)
 	if user != nil {
 		user.Provider = "apple"
-		if user.Name == "" || user.Name == "Apple User" {
+		// Do not overwrite existing real name with default "Apple User"
+		if (user.Name == "" || user.Name == "Apple User") && name != "Apple User" {
 			user.Name = name
 		}
 		if err := s.userRepo.Update(user); err != nil {

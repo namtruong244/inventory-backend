@@ -29,15 +29,23 @@ type LoginRequest struct {
 }
 
 type GoogleLoginRequest struct {
-	Email     string  `json:"email" binding:"required,email"`
-	Name      string  `json:"name" binding:"required"`
-	AvatarURL *string `json:"avatar_url"`
-	AvatarUrl *string `json:"avatarUrl"`
+	Email            string  `json:"email" binding:"required,email"`
+	Name             string  `json:"name" binding:"required"`
+	AvatarURL        *string `json:"avatar_url"`
+	AvatarUrl        *string `json:"avatarUrl"`
+	IDToken          *string `json:"id_token"`
+	IdToken          *string `json:"idToken"`
+	AccessToken      *string `json:"access_token"`
+	AccessTokenCamel *string `json:"accessToken"`
 }
 
 type AppleLoginRequest struct {
-	Email string `json:"email" binding:"required,email"`
-	Name  string `json:"name" binding:"required"`
+	Email                  string  `json:"email" binding:"required,email"`
+	Name                   string  `json:"name" binding:"required"`
+	IdentityToken          *string `json:"identity_token"`
+	IdentityTokenCamel     *string `json:"identityToken"`
+	AuthorizationCode      *string `json:"authorization_code"`
+	AuthorizationCodeCamel *string `json:"authorizationCode"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -84,7 +92,12 @@ func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 		avatarURL = req.AvatarUrl
 	}
 
-	result, err := h.authService.LoginWithGoogle(req.Email, req.Name, avatarURL)
+	idToken := req.IDToken
+	if idToken == nil && req.IdToken != nil {
+		idToken = req.IdToken
+	}
+
+	result, err := h.authService.LoginWithGoogle(req.Email, req.Name, avatarURL, idToken)
 	if err != nil {
 		SendError(c, http.StatusBadRequest, "AUTH_FAILED", err.Error(), nil)
 		return
@@ -100,7 +113,12 @@ func (h *AuthHandler) AppleLogin(c *gin.Context) {
 		return
 	}
 
-	result, err := h.authService.LoginWithApple(req.Email, req.Name)
+	identityToken := req.IdentityToken
+	if identityToken == nil && req.IdentityTokenCamel != nil {
+		identityToken = req.IdentityTokenCamel
+	}
+
+	result, err := h.authService.LoginWithApple(req.Email, req.Name, identityToken)
 	if err != nil {
 		SendError(c, http.StatusBadRequest, "AUTH_FAILED", err.Error(), nil)
 		return

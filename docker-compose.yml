@@ -39,6 +39,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_change_in_production_1234567890}
       JWT_EXPIRATION_HOURS: 720
       UPLOAD_DIR: ./uploads
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-1059613381730-sbh1t9581ud40drbiu8ssh7fj1e3ahev.apps.googleusercontent.com}
+      APPLE_CLIENT_ID: ${APPLE_CLIENT_ID:-com.namtruong244.inventory}
     ports:
       - "8080:8080"
     volumes:
