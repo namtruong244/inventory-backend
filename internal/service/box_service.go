@@ -69,11 +69,16 @@ func (s *boxService) Create(userID uuid.UUID, req CreateBoxRequest) (*models.Box
 		}
 	}
 
+	boxType := strings.ToLower(strings.TrimSpace(req.Type))
+	if boxType == "" {
+		boxType = "box"
+	}
+
 	box := &models.Box{
 		UserID:      userID,
 		ParentID:    req.ParentID,
 		Name:        req.Name,
-		Type:        req.Type,
+		Type:        boxType,
 		Description: req.Description,
 		Label:       req.Label,
 		Icon:        req.Icon,
@@ -127,16 +132,25 @@ func (s *boxService) List(userID uuid.UUID, parentIDParam string, tree bool) (in
 		return s.getBoxTree(userID)
 	}
 
-	var parentID *uuid.UUID
-	if parentIDParam != "" && strings.ToLower(parentIDParam) != "root" {
-		parsed, err := uuid.Parse(parentIDParam)
-		if err != nil {
+	parentIDParam = strings.TrimSpace(parentIDParam)
+
+	var boxes []models.Box
+	var err error
+
+	if parentIDParam == "" {
+		// When parentId is not specified, return all boxes belonging to this user
+		boxes, err = s.boxRepo.ListAll(userID)
+	} else if strings.ToLower(parentIDParam) == "root" {
+		// When parentId is "root", return top-level boxes only (parent_id IS NULL)
+		boxes, err = s.boxRepo.ListByParent(userID, nil)
+	} else {
+		parsed, parseErr := uuid.Parse(parentIDParam)
+		if parseErr != nil {
 			return nil, errors.New("invalid parentId format")
 		}
-		parentID = &parsed
+		boxes, err = s.boxRepo.ListByParent(userID, &parsed)
 	}
 
-	boxes, err := s.boxRepo.ListByParent(userID, parentID)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +203,10 @@ func (s *boxService) Update(userID uuid.UUID, id uuid.UUID, req UpdateBoxRequest
 		box.Name = *req.Name
 	}
 	if req.Type != nil {
-		box.Type = *req.Type
+		boxType := strings.ToLower(strings.TrimSpace(*req.Type))
+		if boxType != "" {
+			box.Type = boxType
+		}
 	}
 	if req.Description != nil {
 		box.Description = *req.Description
