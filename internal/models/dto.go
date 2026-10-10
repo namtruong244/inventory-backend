@@ -71,6 +71,7 @@ type ItemDTO struct {
 	Quantity           float64                `json:"quantity"`
 	Unit               string                 `json:"unit"`
 	MinQuantity        *float64               `json:"minQuantity,omitempty"`
+	IsConsumable       bool                   `json:"isConsumable"`
 	Status             string                 `json:"status"` // stored, inUse, lent, broken, disposed
 	PurchasePrice      *float64               `json:"purchasePrice,omitempty"`
 	PurchaseDate       *time.Time             `json:"purchaseDate,omitempty"`

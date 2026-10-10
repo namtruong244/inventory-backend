@@ -27,6 +27,7 @@ type CreateItemRequest struct {
 	Quantity           *float64               `json:"quantity"`
 	Unit               *string                `json:"unit"`
 	MinQuantity        *float64               `json:"minQuantity"`
+	IsConsumable       *bool                  `json:"isConsumable"`
 	Status             *string                `json:"status"`
 	PurchasePrice      *float64               `json:"purchasePrice"`
 	PurchaseDate       *string                `json:"purchaseDate"`
@@ -47,6 +48,7 @@ type UpdateItemRequest struct {
 	Quantity           *float64               `json:"quantity"`
 	Unit               *string                `json:"unit"`
 	MinQuantity        *float64               `json:"minQuantity"`
+	IsConsumable       *bool                  `json:"isConsumable"`
 	Status             *string                `json:"status"`
 	PurchasePrice      *float64               `json:"purchasePrice"`
 	PurchaseDate       *string                `json:"purchaseDate"`
@@ -113,6 +115,11 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 		status = *req.Status
 	}
 
+	isConsumable := false
+	if req.IsConsumable != nil {
+		isConsumable = *req.IsConsumable
+	}
+
 	item := &models.Item{
 		UserID:             userID,
 		BoxID:              req.BoxID,
@@ -122,6 +129,7 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 		Quantity:           quantity,
 		Unit:               unit,
 		MinQuantity:        req.MinQuantity,
+		IsConsumable:       isConsumable,
 		Status:             status,
 		PurchasePrice:      req.PurchasePrice,
 		PurchaseDate:       req.PurchaseDate,
@@ -231,6 +239,9 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 	}
 	if req.MinQuantity != nil {
 		item.MinQuantity = req.MinQuantity
+	}
+	if req.IsConsumable != nil {
+		item.IsConsumable = *req.IsConsumable
 	}
 	if req.Status != nil {
 		item.Status = *req.Status

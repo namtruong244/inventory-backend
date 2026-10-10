@@ -17,6 +17,7 @@ type Item struct {
 	Quantity           float64                `gorm:"type:numeric(12,2);default:1.0;not null" json:"quantity"`
 	Unit               string                 `gorm:"size:30;default:'pcs';not null" json:"unit"`
 	MinQuantity        *float64               `gorm:"type:numeric(12,2)" json:"minQuantity"`
+	IsConsumable       bool                   `gorm:"default:false;not null" json:"isConsumable"`
 	Status             string                 `gorm:"size:30;default:'stored'" json:"status"`
 	PurchasePrice      *float64               `gorm:"type:numeric(15,2)" json:"purchasePrice"`
 	PurchaseDate       *string                `gorm:"type:varchar(30)" json:"purchaseDate"`
