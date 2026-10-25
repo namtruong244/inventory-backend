@@ -22,8 +22,10 @@ type ItemFilter struct {
 	IsExpired         *bool
 	IsExpiring        *bool
 	ExpiryWarningDays int
-	Page              int
-	Limit             int
+	// Today is the user's local calendar date (YYYY-MM-DD); empty means UTC today.
+	Today string
+	Page  int
+	Limit int
 }
 
 type ItemRepository interface {
@@ -91,8 +93,8 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 	query := r.db.Model(&models.Item{}).Where("user_id = ?", userID)
 
 	if filter.Q != "" {
-		searchTerm := "%" + strings.ToLower(filter.Q) + "%"
-		query = query.Where("(LOWER(name) LIKE ? OR LOWER(description) LIKE ? OR LOWER(COALESCE(barcode, '')) LIKE ? OR LOWER(COALESCE(serial_number, '')) LIKE ?)",
+		searchTerm := "%" + escapeLike(filter.Q) + "%"
+		query = query.Where("(name ILIKE ? OR description ILIKE ? OR COALESCE(barcode, '') ILIKE ? OR COALESCE(serial_number, '') ILIKE ?)",
 			searchTerm, searchTerm, searchTerm, searchTerm)
 	}
 
@@ -112,7 +114,10 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 		query = query.Where("min_quantity IS NOT NULL AND quantity <= min_quantity")
 	}
 
-	nowStr := time.Now().UTC().Format("2006-01-02")
+	nowStr := filter.Today
+	if nowStr == "" {
+		nowStr = time.Now().UTC().Format("2006-01-02")
+	}
 	if filter.IsExpired != nil && *filter.IsExpired {
 		query = query.Where("expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < ?", nowStr)
 	}
@@ -122,7 +127,8 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 		if days <= 0 {
 			days = 30
 		}
-		futureDate := time.Now().UTC().AddDate(0, 0, days).Format("2006-01-02")
+		base, _ := time.Parse("2006-01-02", nowStr)
+		futureDate := base.AddDate(0, 0, days).Format("2006-01-02")
 		query = query.Where("expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= ? AND expiry_date <= ?", nowStr, futureDate)
 	}
 
@@ -199,6 +205,9 @@ func (r *itemRepo) Delete(id uuid.UUID, userID uuid.UUID) error {
 		if err := tx.Where("item_id = ? AND user_id = ?", id, userID).Delete(&models.LendingRecord{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("item_id = ? AND user_id = ?", id, userID).Delete(&models.StockMovement{}).Error; err != nil {
+			return err
+		}
 		return tx.Where("id = ? AND user_id = ?", id, userID).Delete(&models.Item{}).Error
 	})
 }
@@ -244,7 +253,7 @@ func (r *itemRepo) CountByUserID(userID uuid.UUID) (int64, error) {
 func (r *itemRepo) GetTotalEstimatedValue(userID uuid.UUID) (float64, error) {
 	var total *float64
 	row := r.db.Model(&models.Item{}).
-		Where("user_id = ? AND purchase_price IS NOT NULL", userID).
+		Where("user_id = ? AND purchase_price IS NOT NULL AND status NOT IN ('disposed', 'lost')", userID).
 		Select("COALESCE(SUM(purchase_price * quantity), 0)").
 		Row()
 	if err := row.Scan(&total); err != nil {
@@ -254,4 +263,9 @@ func (r *itemRepo) GetTotalEstimatedValue(userID uuid.UUID) (float64, error) {
 		return 0, nil
 	}
 	return *total, nil
+}
+
+// escapeLike escapes LIKE wildcards so user input is matched literally.
+func escapeLike(q string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
 }

@@ -1,6 +1,9 @@
 package service
 
 import (
+	"time"
+
+	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
 
@@ -14,14 +17,16 @@ type SettingsService interface {
 }
 
 type UpdateSettingsRequest struct {
-	CurrencySymbol    *string `json:"currencySymbol"`
-	DefaultUnit       *string `json:"defaultUnit"`
-	ExpiryWarningDays *int    `json:"expiryWarningDays"`
-	NotifyExpiring    *bool   `json:"notifyExpiring"`
-	NotifyOverdue     *bool   `json:"notifyOverdue"`
-	NotifyLowStock    *bool   `json:"notifyLowStock"`
-	VibrateOnScan     *bool   `json:"vibrateOnScan"`
-	AutoOpenOnScan    *bool   `json:"autoOpenOnScan"`
+	CurrencySymbol      *string `json:"currencySymbol"`
+	DefaultUnit         *string `json:"defaultUnit"`
+	ExpiryWarningDays   *int    `json:"expiryWarningDays"`
+	WarrantyWarningDays *int    `json:"warrantyWarningDays"`
+	Timezone            *string `json:"timezone"`
+	NotifyExpiring      *bool   `json:"notifyExpiring"`
+	NotifyOverdue       *bool   `json:"notifyOverdue"`
+	NotifyLowStock      *bool   `json:"notifyLowStock"`
+	VibrateOnScan       *bool   `json:"vibrateOnScan"`
+	AutoOpenOnScan      *bool   `json:"autoOpenOnScan"`
 }
 
 type UpdateProfileRequest struct {
@@ -59,7 +64,22 @@ func (s *settingsService) UpdateSettings(userID uuid.UUID, req UpdateSettingsReq
 		settings.DefaultUnit = *req.DefaultUnit
 	}
 	if req.ExpiryWarningDays != nil {
+		if *req.ExpiryWarningDays < 1 || *req.ExpiryWarningDays > 3650 {
+			return nil, apperr.Invalid("expiryWarningDays must be between 1 and 3650")
+		}
 		settings.ExpiryWarningDays = *req.ExpiryWarningDays
+	}
+	if req.WarrantyWarningDays != nil {
+		if *req.WarrantyWarningDays < 1 || *req.WarrantyWarningDays > 3650 {
+			return nil, apperr.Invalid("warrantyWarningDays must be between 1 and 3650")
+		}
+		settings.WarrantyWarningDays = *req.WarrantyWarningDays
+	}
+	if req.Timezone != nil {
+		if _, err := time.LoadLocation(*req.Timezone); err != nil || *req.Timezone == "" || *req.Timezone == "Local" {
+			return nil, apperr.Invalid("timezone must be a valid IANA name such as Asia/Ho_Chi_Minh")
+		}
+		settings.Timezone = *req.Timezone
 	}
 	if req.NotifyExpiring != nil {
 		settings.NotifyExpiring = *req.NotifyExpiring

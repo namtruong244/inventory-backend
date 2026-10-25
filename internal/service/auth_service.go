@@ -81,17 +81,7 @@ func (s *authService) Register(name, email, password string) (*AuthResult, error
 	}
 
 	// Create initial default user settings
-	_ = s.settingsRepo.Create(&models.UserSettings{
-		UserID:            user.ID,
-		CurrencySymbol:    "$",
-		DefaultUnit:       "pcs",
-		ExpiryWarningDays: 30,
-		NotifyExpiring:    true,
-		NotifyOverdue:     true,
-		NotifyLowStock:    true,
-		VibrateOnScan:     true,
-		AutoOpenOnScan:    true,
-	})
+	_ = s.settingsRepo.Create(models.NewDefaultSettings(user.ID))
 
 	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
 	if err != nil {
@@ -253,17 +243,7 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 			return nil, err
 		}
 
-		_ = s.settingsRepo.Create(&models.UserSettings{
-			UserID:            user.ID,
-			CurrencySymbol:    "$",
-			DefaultUnit:       "pcs",
-			ExpiryWarningDays: 30,
-			NotifyExpiring:    true,
-			NotifyOverdue:     true,
-			NotifyLowStock:    true,
-			VibrateOnScan:     true,
-			AutoOpenOnScan:    true,
-		})
+		_ = s.settingsRepo.Create(models.NewDefaultSettings(user.ID))
 	}
 
 	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)

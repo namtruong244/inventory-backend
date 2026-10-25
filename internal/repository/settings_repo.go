@@ -31,19 +31,9 @@ func (r *settingsRepo) GetByUserID(userID uuid.UUID) (*models.UserSettings, erro
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			// Create default settings if not exists
-			defaultSettings := models.UserSettings{
-				UserID:            userID,
-				CurrencySymbol:    "$",
-				DefaultUnit:       "pcs",
-				ExpiryWarningDays: 30,
-				NotifyExpiring:    true,
-				NotifyOverdue:     true,
-				NotifyLowStock:    true,
-				VibrateOnScan:     true,
-				AutoOpenOnScan:    true,
-			}
-			if createErr := r.db.Create(&defaultSettings).Error; createErr == nil {
-				return &defaultSettings, nil
+			defaultSettings := models.NewDefaultSettings(userID)
+			if createErr := r.db.Create(defaultSettings).Error; createErr == nil {
+				return defaultSettings, nil
 			}
 		}
 		return nil, err

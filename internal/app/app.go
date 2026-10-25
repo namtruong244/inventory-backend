@@ -43,7 +43,7 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	settingsService := service.NewSettingsService(settingsRepo, userRepo)
 	categoryService := service.NewCategoryService(categoryRepo)
 	boxService := service.NewBoxService(boxRepo, itemRepo)
-	itemService := service.NewItemService(itemRepo, boxRepo, lendingRepo, settingsRepo)
+	itemService := service.NewItemService(itemRepo, boxRepo, lendingRepo, settingsRepo, categoryRepo, repository.NewMovementRepository(db))
 	lendingService := service.NewLendingService(lendingRepo, itemRepo)
 	scanService := service.NewScanService(boxRepo, itemRepo)
 	alertService := service.NewAlertService(db, settingsRepo, lendingRepo)
@@ -145,6 +145,7 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 				itemsGroup.PUT("/:id", itemHandler.Update)
 				itemsGroup.PATCH("/:id/move", itemHandler.Move)
 				itemsGroup.PATCH("/:id/quantity", itemHandler.UpdateQuantity)
+				itemsGroup.GET("/:id/movements", itemHandler.Movements)
 				itemsGroup.DELETE("/:id", itemHandler.Delete)
 			}
 

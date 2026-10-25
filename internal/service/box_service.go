@@ -113,9 +113,8 @@ func (s *boxService) GetByID(userID uuid.UUID, id uuid.UUID) (*BoxDetailResponse
 	if err != nil {
 		subBoxes = []models.Box{}
 	}
-	for i := range subBoxes {
-		subBoxes[i].ItemCount, _ = s.getBoxItemCount(subBoxes[i].ID, userID)
-		subBoxes[i].SubBoxCount, _ = s.getBoxSubBoxCount(subBoxes[i].ID, userID)
+	if err := s.fillCounts(userID, subBoxes); err != nil {
+		return nil, err
 	}
 
 	items, _, err := s.itemRepo.List(userID, repository.ItemFilter{
@@ -162,9 +161,8 @@ func (s *boxService) List(userID uuid.UUID, parentIDParam string, tree bool) (in
 		return nil, err
 	}
 
-	for i := range boxes {
-		boxes[i].ItemCount, _ = s.getBoxItemCount(boxes[i].ID, userID)
-		boxes[i].SubBoxCount, _ = s.getBoxSubBoxCount(boxes[i].ID, userID)
+	if err := s.fillCounts(userID, boxes); err != nil {
+		return nil, err
 	}
 
 	return boxes, nil
@@ -176,11 +174,13 @@ func (s *boxService) getBoxTree(userID uuid.UUID) ([]*models.Box, error) {
 		return nil, err
 	}
 
+	if err := s.fillCounts(userID, allBoxes); err != nil {
+		return nil, err
+	}
+
 	boxMap := make(map[uuid.UUID]*models.Box)
 	for i := range allBoxes {
 		b := allBoxes[i]
-		b.ItemCount, _ = s.getBoxItemCount(b.ID, userID)
-		b.SubBoxCount, _ = s.getBoxSubBoxCount(b.ID, userID)
 		b.Children = make([]*models.Box, 0)
 		boxMap[b.ID] = &b
 	}
@@ -275,12 +275,19 @@ func (s *boxService) Delete(userID uuid.UUID, id uuid.UUID, cascade bool) error 
 	return s.boxRepo.Delete(id, userID, cascade)
 }
 
-func (s *boxService) getBoxItemCount(boxID, userID uuid.UUID) (int, error) {
-	c, err := s.boxRepo.CountItemsInBox(boxID, userID)
-	return int(c), err
-}
-
-func (s *boxService) getBoxSubBoxCount(boxID, userID uuid.UUID) (int, error) {
-	c, err := s.boxRepo.CountSubBoxesInBox(boxID, userID)
-	return int(c), err
+// fillCounts sets ItemCount/SubBoxCount on every box using two grouped queries
+// (instead of two COUNT queries per box).
+func (s *boxService) fillCounts(userID uuid.UUID, boxes []models.Box) error {
+	if len(boxes) == 0 {
+		return nil
+	}
+	items, subBoxes, err := s.boxRepo.CountsByBox(userID)
+	if err != nil {
+		return err
+	}
+	for i := range boxes {
+		boxes[i].ItemCount = int(items[boxes[i].ID])
+		boxes[i].SubBoxCount = int(subBoxes[boxes[i].ID])
+	}
+	return nil
 }

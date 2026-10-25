@@ -86,6 +86,16 @@ func (m *mockBoxRepo) CountSubBoxesInBox(boxID, userID uuid.UUID) (int64, error)
 	return 0, nil
 }
 
+func (m *mockBoxRepo) CountsByBox(userID uuid.UUID) (map[uuid.UUID]int64, map[uuid.UUID]int64, error) {
+	subs := map[uuid.UUID]int64{}
+	for _, b := range m.boxes {
+		if b.UserID == userID && b.ParentID != nil {
+			subs[*b.ParentID]++
+		}
+	}
+	return map[uuid.UUID]int64{}, subs, nil
+}
+
 func (m *mockBoxRepo) GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]models.BreadcrumbItem, error) {
 	return []models.BreadcrumbItem{}, nil
 }

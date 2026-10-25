@@ -1,6 +1,7 @@
 package service
 
 import (
+	"log"
 	"strings"
 	"time"
 
@@ -8,12 +9,13 @@ import (
 
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
+	"inventory_backend/internal/utils"
 
 	"github.com/google/uuid"
 )
 
 var validItemStatuses = map[string]bool{
-	"stored": true, "inUse": true, "lent": true, "broken": true, "disposed": true,
+	"stored": true, "inUse": true, "lent": true, "broken": true, "disposed": true, "lost": true,
 }
 
 // normalizeDate accepts "YYYY-MM-DD" or an RFC3339 timestamp and stores only
@@ -41,7 +43,8 @@ type ItemService interface {
 	List(userID uuid.UUID, filter repository.ItemFilter) ([]models.Item, int64, error)
 	Update(userID uuid.UUID, id uuid.UUID, req UpdateItemRequest) (*models.Item, error)
 	Move(userID uuid.UUID, id uuid.UUID, targetBoxID uuid.UUID) error
-	UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity float64) error
+	UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity float64, reason, note string) error
+	Movements(userID uuid.UUID, id uuid.UUID) (*MovementHistory, error)
 	Delete(userID uuid.UUID, id uuid.UUID) error
 }
 
@@ -100,6 +103,8 @@ type itemService struct {
 	boxRepo      repository.BoxRepository
 	lendingRepo  repository.LendingRepository
 	settingsRepo repository.SettingsRepository
+	categoryRepo repository.CategoryRepository
+	movementRepo repository.MovementRepository
 }
 
 func NewItemService(
@@ -107,13 +112,27 @@ func NewItemService(
 	boxRepo repository.BoxRepository,
 	lendingRepo repository.LendingRepository,
 	settingsRepo repository.SettingsRepository,
+	categoryRepo repository.CategoryRepository,
+	movementRepo repository.MovementRepository,
 ) ItemService {
 	return &itemService{
 		itemRepo:     itemRepo,
 		boxRepo:      boxRepo,
 		lendingRepo:  lendingRepo,
 		settingsRepo: settingsRepo,
+		categoryRepo: categoryRepo,
+		movementRepo: movementRepo,
 	}
+}
+
+// resolveCategory checks that the category exists for this user and returns the
+// canonical value stored on items (the category name, which is what clients send).
+func (s *itemService) resolveCategory(userID uuid.UUID, value string) (string, error) {
+	cat, err := s.categoryRepo.Resolve(userID, strings.TrimSpace(value))
+	if err != nil || cat == nil {
+		return "", apperr.Invalid("category does not exist")
+	}
+	return cat.Name, nil
 }
 
 func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.Item, error) {
@@ -121,6 +140,11 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 	box, err := s.boxRepo.GetByID(req.BoxID, userID)
 	if err != nil || box == nil {
 		return nil, apperr.NotFound("target box does not exist or does not belong to you")
+	}
+
+	categoryName, err := s.resolveCategory(userID, req.CategoryID)
+	if err != nil {
+		return nil, err
 	}
 
 	quantity := 1.0
@@ -160,7 +184,7 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 		status = *req.Status
 	}
 	if !validItemStatuses[status] {
-		return nil, apperr.Invalid("invalid status, must be one of: stored, inUse, broken, disposed")
+		return nil, apperr.Invalid("invalid status, must be one of: stored, inUse, broken, disposed, lost")
 	}
 	if status == "lent" {
 		return nil, apperr.Invalid("status 'lent' can only be set by lending the item")
@@ -174,7 +198,7 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 	item := &models.Item{
 		UserID:             userID,
 		BoxID:              req.BoxID,
-		CategoryID:         req.CategoryID,
+		CategoryID:         categoryName,
 		Name:               req.Name,
 		Description:        req.Description,
 		Quantity:           quantity,
@@ -196,6 +220,7 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 	if err := s.itemRepo.Create(item); err != nil {
 		return nil, err
 	}
+	s.recordMovement(item, item.Quantity, models.MovementInitial, "")
 
 	item.BoxName = box.Name
 	item.IsLowStock = item.ComputeIsLowStock()
@@ -238,13 +263,17 @@ func (s *itemService) GetByID(userID uuid.UUID, id uuid.UUID) (*ItemDetailRespon
 }
 
 func (s *itemService) List(userID uuid.UUID, filter repository.ItemFilter) ([]models.Item, int64, error) {
-	// Look up expiry warning days from settings
+	// Settings decide the user's "today" and the expiring-soon window
+	settings, err := s.settingsRepo.GetByUserID(userID)
+	tz := "UTC"
+	if err == nil && settings != nil {
+		tz = settings.Timezone
+	}
+	filter.Today = utils.TodayIn(tz)
 	if filter.IsExpiring != nil && *filter.IsExpiring && filter.ExpiryWarningDays == 0 {
-		settings, err := s.settingsRepo.GetByUserID(userID)
+		filter.ExpiryWarningDays = 30
 		if err == nil && settings != nil && settings.ExpiryWarningDays > 0 {
 			filter.ExpiryWarningDays = settings.ExpiryWarningDays
-		} else {
-			filter.ExpiryWarningDays = 30
 		}
 	}
 
@@ -280,8 +309,13 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 		item.BoxID = *req.BoxID
 	}
 	if req.CategoryID != nil {
-		item.CategoryID = *req.CategoryID
+		categoryName, err := s.resolveCategory(userID, *req.CategoryID)
+		if err != nil {
+			return nil, err
+		}
+		item.CategoryID = categoryName
 	}
+	oldQuantity := item.Quantity
 	if req.Quantity != nil {
 		if *req.Quantity < 0 {
 			return nil, apperr.Invalid("quantity cannot be negative")
@@ -304,7 +338,7 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 	}
 	if req.Status != nil && *req.Status != item.Status {
 		if !validItemStatuses[*req.Status] {
-			return nil, apperr.Invalid("invalid status, must be one of: stored, inUse, broken, disposed")
+			return nil, apperr.Invalid("invalid status, must be one of: stored, inUse, broken, disposed, lost")
 		}
 		// 'lent' is owned by the lending flow so status and open loans never disagree.
 		if *req.Status == "lent" || item.Status == "lent" {
@@ -356,6 +390,10 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 		return nil, apperr.ConflictOnUnique(err, "item conflicts with an existing item")
 	}
 
+	if item.Quantity != oldQuantity {
+		s.recordMovement(item, item.Quantity-oldQuantity, models.MovementAdjust, "")
+	}
+
 	item.IsLowStock = item.ComputeIsLowStock()
 	return item, nil
 }
@@ -366,14 +404,89 @@ func (s *itemService) Move(userID uuid.UUID, id uuid.UUID, targetBoxID uuid.UUID
 		return apperr.NotFound("target box does not exist or does not belong to you")
 	}
 
-	return s.itemRepo.Move(id, userID, targetBoxID)
+	if err := s.itemRepo.Move(id, userID, targetBoxID); err != nil {
+		return err
+	}
+	if item, err := s.itemRepo.GetByID(id, userID); err == nil && item != nil {
+		s.recordMovement(item, 0, models.MovementMove, "box "+targetBoxID.String())
+	}
+	return nil
 }
 
-func (s *itemService) UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity float64) error {
+func (s *itemService) UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity float64, reason, note string) error {
 	if quantity < 0 {
 		return apperr.Invalid("quantity cannot be negative")
 	}
-	return s.itemRepo.UpdateQuantity(id, userID, quantity)
+	if reason == "" {
+		reason = models.MovementAdjust
+	}
+	if !models.ValidMovementReasons[reason] {
+		return apperr.Invalid("reason must be one of: restock, consume, damaged, lost, correction, adjust")
+	}
+	item, err := s.itemRepo.GetByID(id, userID)
+	if err != nil || item == nil {
+		return apperr.NotFound("item not found")
+	}
+	old := item.Quantity
+	if err := s.itemRepo.UpdateQuantity(id, userID, quantity); err != nil {
+		return err
+	}
+	item.Quantity = quantity
+	if quantity != old {
+		s.recordMovement(item, quantity-old, reason, note)
+	}
+	return nil
+}
+
+// MovementHistory is the audit trail of an item plus a consumption estimate.
+type MovementHistory struct {
+	Movements []models.StockMovement `json:"movements"`
+	// AvgDailyConsumption30d is the average units consumed per day over the last 30 days.
+	AvgDailyConsumption30d float64 `json:"avgDailyConsumption30d"`
+	// EstimatedDaysLeft is nil when there is no consumption to extrapolate from.
+	EstimatedDaysLeft *float64 `json:"estimatedDaysLeft"`
+}
+
+func (s *itemService) Movements(userID uuid.UUID, id uuid.UUID) (*MovementHistory, error) {
+	item, err := s.itemRepo.GetByID(id, userID)
+	if err != nil || item == nil {
+		return nil, apperr.NotFound("item not found")
+	}
+	list, err := s.movementRepo.ListByItem(userID, id, 200)
+	if err != nil {
+		return nil, err
+	}
+	return buildMovementHistory(list, item.Quantity, time.Now().UTC()), nil
+}
+
+func buildMovementHistory(list []models.StockMovement, quantity float64, now time.Time) *MovementHistory {
+	since := now.AddDate(0, 0, -30)
+	var consumed float64
+	for _, m := range list {
+		if m.Delta < 0 && m.CreatedAt.After(since) && m.Reason == models.MovementConsume {
+			consumed -= m.Delta
+		}
+	}
+	h := &MovementHistory{Movements: list, AvgDailyConsumption30d: consumed / 30}
+	if h.AvgDailyConsumption30d > 0 {
+		d := quantity / h.AvgDailyConsumption30d
+		h.EstimatedDaysLeft = &d
+	}
+	return h
+}
+
+// recordMovement is best-effort: a failed audit write must not fail the stock change.
+func (s *itemService) recordMovement(item *models.Item, delta float64, reason, note string) {
+	if s.movementRepo == nil {
+		return
+	}
+	m := &models.StockMovement{
+		UserID: item.UserID, ItemID: item.ID, Delta: delta,
+		QuantityAfter: item.Quantity, Reason: reason, Note: note,
+	}
+	if err := s.movementRepo.Create(m); err != nil {
+		log.Printf("record stock movement failed: %v", err)
+	}
 }
 
 func (s *itemService) Delete(userID uuid.UUID, id uuid.UUID) error {

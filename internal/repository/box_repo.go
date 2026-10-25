@@ -20,6 +20,8 @@ type BoxRepository interface {
 	Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error
 	CountItemsInBox(boxID, userID uuid.UUID) (int64, error)
 	CountSubBoxesInBox(boxID, userID uuid.UUID) (int64, error)
+	// CountsByBox returns item and sub-box counts for every box of the user in two queries.
+	CountsByBox(userID uuid.UUID) (items map[uuid.UUID]int64, subBoxes map[uuid.UUID]int64, err error)
 	GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]models.BreadcrumbItem, error)
 	IsDescendant(boxID, potentialDescendantID, userID uuid.UUID) (bool, error)
 }
@@ -104,6 +106,31 @@ func (r *boxRepo) CountSubBoxesInBox(boxID, userID uuid.UUID) (int64, error) {
 	var count int64
 	err := r.db.Model(&models.Box{}).Where("parent_id = ? AND user_id = ?", boxID, userID).Count(&count).Error
 	return count, err
+}
+
+func (r *boxRepo) CountsByBox(userID uuid.UUID) (map[uuid.UUID]int64, map[uuid.UUID]int64, error) {
+	type row struct {
+		ID    uuid.UUID
+		Count int64
+	}
+	collect := func(rows []row) map[uuid.UUID]int64 {
+		m := make(map[uuid.UUID]int64, len(rows))
+		for _, r := range rows {
+			m[r.ID] = r.Count
+		}
+		return m
+	}
+
+	var itemRows, boxRows []row
+	if err := r.db.Model(&models.Item{}).Select("box_id AS id, COUNT(*) AS count").
+		Where("user_id = ?", userID).Group("box_id").Scan(&itemRows).Error; err != nil {
+		return nil, nil, err
+	}
+	if err := r.db.Model(&models.Box{}).Select("parent_id AS id, COUNT(*) AS count").
+		Where("user_id = ? AND parent_id IS NOT NULL", userID).Group("parent_id").Scan(&boxRows).Error; err != nil {
+		return nil, nil, err
+	}
+	return collect(itemRows), collect(boxRows), nil
 }
 
 func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {

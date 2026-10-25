@@ -30,6 +30,9 @@ type MoveItemRequest struct {
 
 type UpdateQuantityRequest struct {
 	Quantity *float64 `json:"quantity" binding:"required,gte=0"`
+	// Reason: restock, consume, damaged, lost, correction or adjust (default).
+	Reason string `json:"reason"`
+	Note   string `json:"note"`
 }
 
 func (h *ItemHandler) List(c *gin.Context) {
@@ -218,7 +221,7 @@ func (h *ItemHandler) UpdateQuantity(c *gin.Context) {
 		return
 	}
 
-	err = h.itemService.UpdateQuantity(userID, id, *req.Quantity)
+	err = h.itemService.UpdateQuantity(userID, id, *req.Quantity, req.Reason, req.Note)
 	if err != nil {
 		fail(c, "UPDATE_QUANTITY_FAILED", err)
 		return
@@ -247,4 +250,23 @@ func (h *ItemHandler) Delete(c *gin.Context) {
 	}
 
 	SendSuccess(c, http.StatusOK, gin.H{"deleted": id}, "Item deleted successfully")
+}
+
+func (h *ItemHandler) Movements(c *gin.Context) {
+	userID, ok := middleware.GetCurrentUserID(c)
+	if !ok {
+		SendError(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not authenticated", nil)
+		return
+	}
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		SendError(c, http.StatusBadRequest, "INVALID_ID", "Invalid item ID format", nil)
+		return
+	}
+	res, err := h.itemService.Movements(userID, id)
+	if err != nil {
+		fail(c, "GET_MOVEMENTS_FAILED", err)
+		return
+	}
+	SendSuccess(c, http.StatusOK, res, "Movements retrieved successfully")
 }
