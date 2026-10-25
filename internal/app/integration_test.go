@@ -247,3 +247,33 @@ func TestIntegration_PartialLending(t *testing.T) {
 		t.Errorf("quantity after return = %v, want 8", got)
 	}
 }
+
+// Offline clients pre-generate ids; replaying a create/lend must not duplicate.
+func TestIntegration_ClientGeneratedIDs(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "cid-"+suffix+"@example.com")
+
+	boxID := "7c1f3a52-0b0e-4f55-9c64-2a8c0d4e9a01"
+	itemID := "7c1f3a52-0b0e-4f55-9c64-2a8c0d4e9a02"
+	loanID := "7c1f3a52-0b0e-4f55-9c64-2a8c0d4e9a03"
+
+	for i := 0; i < 2; i++ {
+		code, out := a.do("POST", "/boxes", map[string]any{"id": boxID, "name": "Room", "type": "room", "label": "CID-" + suffix})
+		if code != http.StatusCreated || id(out) != boxID {
+			t.Fatalf("box create #%d: %d %v", i, code, out)
+		}
+		code, out = a.do("POST", "/items", map[string]any{"id": itemID, "name": "Bolt", "boxId": boxID, "categoryId": "Tools & Hardware", "quantity": 5})
+		if code != http.StatusCreated || id(out) != itemID {
+			t.Fatalf("item create #%d: %d %v", i, code, out)
+		}
+		code, out = a.do("POST", "/lending/lend", map[string]any{"id": loanID, "itemId": itemID, "borrowerName": "bob", "quantity": 2})
+		if code != http.StatusCreated || id(out) != loanID {
+			t.Fatalf("lend #%d: %d %v", i, code, out)
+		}
+	}
+	_, out := a.do("GET", "/items/"+itemID, nil)
+	if got := out["data"].(map[string]any)["quantity"].(float64); got != 3 {
+		t.Errorf("quantity after replayed lend = %v, want 3", got)
+	}
+}

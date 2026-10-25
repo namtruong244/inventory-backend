@@ -49,6 +49,8 @@ type ItemService interface {
 }
 
 type CreateItemRequest struct {
+	// ID is optional: offline clients pre-generate it so a replayed create is idempotent.
+	ID                 *uuid.UUID             `json:"id"`
 	Name               string                 `json:"name" binding:"required"`
 	Description        string                 `json:"description"`
 	BoxID              uuid.UUID              `json:"boxId" binding:"required"`
@@ -136,6 +138,12 @@ func (s *itemService) resolveCategory(userID uuid.UUID, value string) (string, e
 }
 
 func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.Item, error) {
+	if req.ID != nil {
+		if existing, err := s.itemRepo.GetByID(*req.ID, userID); err == nil && existing != nil {
+			return existing, nil
+		}
+	}
+
 	// Verify target box exists
 	box, err := s.boxRepo.GetByID(req.BoxID, userID)
 	if err != nil || box == nil {
@@ -217,8 +225,12 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 		CustomAttributes:   req.CustomAttributes,
 	}
 
+	if req.ID != nil {
+		item.ID = *req.ID
+	}
+
 	if err := s.itemRepo.Create(item); err != nil {
-		return nil, err
+		return nil, apperr.ConflictOnUnique(err, "an item with this id already exists")
 	}
 	s.recordMovement(item, item.Quantity, models.MovementInitial, "")
 

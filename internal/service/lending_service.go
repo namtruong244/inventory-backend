@@ -20,6 +20,8 @@ type LendingService interface {
 }
 
 type LendItemRequest struct {
+	// ID is optional: offline clients pre-generate it so a replayed lend is idempotent.
+	ID                 *uuid.UUID `json:"id"`
 	ItemID             uuid.UUID  `json:"itemId" binding:"required"`
 	BorrowerName       string     `json:"borrowerName" binding:"required"`
 	BorrowerContact    string     `json:"borrowerContact"`
@@ -43,6 +45,12 @@ func NewLendingService(lendingRepo repository.LendingRepository, itemRepo reposi
 }
 
 func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*models.LendingRecord, error) {
+	if req.ID != nil {
+		if existing, err := s.lendingRepo.GetByID(*req.ID, userID); err == nil && existing != nil {
+			return existing, nil
+		}
+	}
+
 	lentDate := time.Now().UTC()
 	if req.LentDate != nil {
 		lentDate = *req.LentDate
@@ -71,6 +79,10 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 		LentDate:           lentDate,
 		ExpectedReturnDate: req.ExpectedReturnDate,
 		Notes:              req.Notes,
+	}
+
+	if req.ID != nil {
+		record.ID = *req.ID
 	}
 
 	// Business Rule 3: Lending Integrity — checked and applied atomically in the repository

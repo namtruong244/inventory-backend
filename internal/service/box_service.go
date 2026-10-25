@@ -20,6 +20,8 @@ type BoxService interface {
 }
 
 type CreateBoxRequest struct {
+	// ID is optional: offline clients pre-generate it so a replayed create is idempotent.
+	ID          *uuid.UUID `json:"id"`
 	Name        string     `json:"name" binding:"required"`
 	Type        string     `json:"type" binding:"required"`
 	Description string     `json:"description"`
@@ -60,6 +62,12 @@ var validBoxTypes = map[string]bool{
 }
 
 func (s *boxService) Create(userID uuid.UUID, req CreateBoxRequest) (*models.Box, error) {
+	if req.ID != nil {
+		if existing, err := s.boxRepo.GetByID(*req.ID, userID); err == nil && existing != nil {
+			return existing, nil
+		}
+	}
+
 	// Verify label uniqueness
 	existing, _ := s.boxRepo.GetByLabel(req.Label, &userID)
 	if existing != nil {
@@ -89,6 +97,9 @@ func (s *boxService) Create(userID uuid.UUID, req CreateBoxRequest) (*models.Box
 		Description: req.Description,
 		Label:       req.Label,
 		Icon:        req.Icon,
+	}
+	if req.ID != nil {
+		box.ID = *req.ID
 	}
 
 	if err := s.boxRepo.Create(box); err != nil {

@@ -1129,3 +1129,8 @@ type ScanLookupResponse struct {
 - `POST /lending/lend` nhận thêm `quantity` (tùy chọn). Bỏ trống hoặc `>= quantity` hiện có → mượn nguyên item (status `lent`). `0 < quantity < tồn kho` → mượn một phần: trừ `items.quantity`, giữ nguyên status, `isPartial = true`; trả lại sẽ cộng số lượng về.
 - `quantity` vượt tồn kho → 400. Nhiều khoản mượn một phần có thể cùng mở trên một item (`uq_lending_open_whole` chỉ chặn khoản mượn nguyên item).
 - `lending_records` có thêm `quantity`, `is_partial`; stock movement có lý do `lend` / `return`.
+
+## ID do client sinh (offline sync) — BIZ-10
+
+- `POST /boxes`, `POST /items` và `POST /lending/lend` nhận thêm `id` (UUID, tùy chọn). App offline tự sinh ID để không cần ánh xạ ID tạm.
+- Idempotent: nếu `id` đã tồn tại cho user này, trả lại bản ghi đã có (không tạo trùng, không lend lần hai). `id` đã thuộc user khác → 409.
