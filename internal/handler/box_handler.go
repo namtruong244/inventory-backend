@@ -58,7 +58,7 @@ func (h *BoxHandler) Create(c *gin.Context) {
 
 	box, err := h.boxService.Create(userID, req)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "CREATE_FAILED", err.Error(), nil)
+		fail(c, "CREATE_FAILED", err)
 		return
 	}
 
@@ -80,7 +80,7 @@ func (h *BoxHandler) GetByID(c *gin.Context) {
 
 	detail, err := h.boxService.GetByID(userID, id)
 	if err != nil {
-		SendError(c, http.StatusNotFound, "BOX_NOT_FOUND", err.Error(), nil)
+		fail(c, "BOX_NOT_FOUND", err)
 		return
 	}
 
@@ -108,7 +108,7 @@ func (h *BoxHandler) Update(c *gin.Context) {
 
 	box, err := h.boxService.Update(userID, id, req)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "UPDATE_FAILED", err.Error(), nil)
+		fail(c, "UPDATE_FAILED", err)
 		return
 	}
 
@@ -136,7 +136,7 @@ func (h *BoxHandler) Move(c *gin.Context) {
 
 	err = h.boxService.Move(userID, id, req.NewParentID)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "MOVE_FAILED", err.Error(), nil)
+		fail(c, "MOVE_FAILED", err)
 		return
 	}
 
@@ -161,7 +161,7 @@ func (h *BoxHandler) Delete(c *gin.Context) {
 
 	err = h.boxService.Delete(userID, id, cascade)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "DELETE_FAILED", err.Error(), nil)
+		fail(c, "DELETE_FAILED", err)
 		return
 	}
 

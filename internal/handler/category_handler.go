@@ -30,7 +30,7 @@ func (h *CategoryHandler) List(c *gin.Context) {
 
 	categories, err := h.categoryService.List(userID)
 	if err != nil {
-		SendError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+		fail(c, "INTERNAL_ERROR", err)
 		return
 	}
 
@@ -52,7 +52,7 @@ func (h *CategoryHandler) Create(c *gin.Context) {
 
 	cat, err := h.categoryService.Create(userID, req.Name)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "CREATE_FAILED", err.Error(), nil)
+		fail(c, "CREATE_FAILED", err)
 		return
 	}
 
@@ -74,7 +74,7 @@ func (h *CategoryHandler) Delete(c *gin.Context) {
 
 	err := h.categoryService.Delete(userID, name)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "DELETE_FAILED", err.Error(), nil)
+		fail(c, "DELETE_FAILED", err)
 		return
 	}
 

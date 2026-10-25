@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"inventory_backend/internal/apperr"
 	"net/http"
 
 	"inventory_backend/internal/middleware"
@@ -32,9 +33,13 @@ func (h *ScanHandler) Lookup(c *gin.Context) {
 
 	result, err := h.scanService.Lookup(userID, code)
 	if err != nil {
-		SendError(c, http.StatusNotFound, "NOT_FOUND", err.Error(), []ErrorDetail{
-			{Field: "code", Message: "No box or item found matching code " + code},
-		})
+		if e, ok := apperr.As(err); ok && e.Kind == apperr.KindNotFound {
+			SendError(c, http.StatusNotFound, "NOT_FOUND", e.Msg, []ErrorDetail{
+				{Field: "code", Message: "No box or item found matching code " + code},
+			})
+			return
+		}
+		fail(c, "INVALID_INPUT", err)
 		return
 	}
 

@@ -1,7 +1,7 @@
 package service
 
 import (
-	"errors"
+	"inventory_backend/internal/apperr"
 
 	"inventory_backend/internal/repository"
 
@@ -48,7 +48,7 @@ func NewScanService(boxRepo repository.BoxRepository, itemRepo repository.ItemRe
 
 func (s *scanService) Lookup(userID uuid.UUID, code string) (*ScanLookupResult, error) {
 	if code == "" {
-		return nil, errors.New("code parameter is required")
+		return nil, apperr.Invalid("code parameter is required")
 	}
 
 	// 1. Check boxes by label
@@ -84,5 +84,5 @@ func (s *scanService) Lookup(userID uuid.UUID, code string) (*ScanLookupResult, 
 		}, nil
 	}
 
-	return nil, errors.New("no matching box or item found for the provided code")
+	return nil, apperr.NotFound("no matching box or item found for the provided code")
 }

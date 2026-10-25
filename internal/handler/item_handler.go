@@ -82,7 +82,7 @@ func (h *ItemHandler) List(c *gin.Context) {
 
 	items, total, err := h.itemService.List(userID, filter)
 	if err != nil {
-		SendError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+		fail(c, "INTERNAL_ERROR", err)
 		return
 	}
 
@@ -114,7 +114,7 @@ func (h *ItemHandler) Create(c *gin.Context) {
 
 	item, err := h.itemService.Create(userID, req)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "CREATE_FAILED", err.Error(), nil)
+		fail(c, "CREATE_FAILED", err)
 		return
 	}
 
@@ -136,7 +136,7 @@ func (h *ItemHandler) GetByID(c *gin.Context) {
 
 	detail, err := h.itemService.GetByID(userID, id)
 	if err != nil {
-		SendError(c, http.StatusNotFound, "ITEM_NOT_FOUND", err.Error(), nil)
+		fail(c, "ITEM_NOT_FOUND", err)
 		return
 	}
 
@@ -164,7 +164,7 @@ func (h *ItemHandler) Update(c *gin.Context) {
 
 	item, err := h.itemService.Update(userID, id, req)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "UPDATE_FAILED", err.Error(), nil)
+		fail(c, "UPDATE_FAILED", err)
 		return
 	}
 
@@ -192,7 +192,7 @@ func (h *ItemHandler) Move(c *gin.Context) {
 
 	err = h.itemService.Move(userID, id, req.TargetBoxID)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "MOVE_FAILED", err.Error(), nil)
+		fail(c, "MOVE_FAILED", err)
 		return
 	}
 
@@ -220,7 +220,7 @@ func (h *ItemHandler) UpdateQuantity(c *gin.Context) {
 
 	err = h.itemService.UpdateQuantity(userID, id, *req.Quantity)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "UPDATE_QUANTITY_FAILED", err.Error(), nil)
+		fail(c, "UPDATE_QUANTITY_FAILED", err)
 		return
 	}
 
@@ -242,7 +242,7 @@ func (h *ItemHandler) Delete(c *gin.Context) {
 
 	err = h.itemService.Delete(userID, id)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "DELETE_FAILED", err.Error(), nil)
+		fail(c, "DELETE_FAILED", err)
 		return
 	}
 

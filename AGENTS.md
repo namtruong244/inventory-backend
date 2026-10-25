@@ -59,6 +59,9 @@ Hệ thống quản lý kho & tài sản cá nhân / doanh nghiệp nhỏ bao g�
 }
 ```
 
+- **Mã lỗi theo loại:** dữ liệu không hợp lệ → 400 (`INVALID_INPUT` hoặc `*_FAILED`); không tìm thấy / không thuộc user → 404 `NOT_FOUND`; xung đột (trùng `label`, item đang mượn, cập nhật đồng thời, box còn nội dung khi `cascade=false`) → 409 `CONFLICT`; lỗi không lường trước → 500 `INTERNAL_ERROR` (message chung, chi tiết chỉ ghi log).
+- **Ngày của item** (`purchaseDate`, `warrantyExpiryDate`, `expiryDate`): server chuẩn hoá về `YYYY-MM-DD` (nhận cả ISO 8601 đầy đủ). Client nên gửi đúng ngày lịch người dùng chọn.
+
 ---
 
 ## 3. Thiết kế Cơ sở dữ liệu (Database Schema & DDL Migration)
@@ -931,7 +934,16 @@ Tải lên ảnh chụp thực tế đồ đạc hoặc ảnh hóa đơn mua hà
 
 3. **Toàn vẹn trạng thái mượn đồ (Lending Integrity):**
    - Không cho phép xuất mượn món đồ đang có trạng thái `lent`, `broken`, hoặc `disposed`.
-   - Khi trả đồ, trạng thái phải được trả lại là `stored` hoặc `inUse` và cập nhật `actual_return_date = NOW()`.
+   - Khi mượn, trạng thái trước đó được lưu vào `lending_records.previous_status`; khi trả đồ, item trở về đúng trạng thái đó (`stored`/`inUse`, mặc định `stored`) và `actual_return_date = NOW()`.
+   - Trạng thái `lent` chỉ được đặt/gỡ qua API mượn/trả; `POST/PUT /items` không được chuyển item sang hoặc ra khỏi `lent`.
+
+6. **Toàn vẹn dữ liệu & xoá:**
+   - `type` của box chỉ nhận `room|cabinet|shelf|box|drawer|other`; `status` của item chỉ nhận `stored|inUse|lent|broken|disposed`; `quantity` và `minQuantity` không âm.
+   - Để xoá `minQuantity` khi `PUT /items/:id`, gửi `"clearMinQuantity": true` (gửi `minQuantity: null` bị coi là "không đổi").
+   - Xoá item đang `lent` → 409. Xoá box: mặc định `cascade=false` và trả 409 nếu box còn con/item; `cascade=true` xoá cả cây nhưng bị từ chối (409) nếu trong cây có item đang `lent`. Khoản mượn của item bị xoá được xoá theo.
+   - Cập nhật item/box dùng optimistic lock theo `updated_at`: nếu bản ghi vừa bị sửa bởi request khác → 409 `CONFLICT`, client nên tải lại.
+   - Khoá ngoại ở mức DB: `items.box_id`, `lending_records.item_id`, `boxes.parent_id`. Nếu dữ liệu cũ vi phạm, server dừng khi khởi động (cần dọn dữ liệu).
+   - `GET /reports/export` stream CSV/JSON theo lô 500 bản ghi; ô CSV bắt đầu bằng `= + - @` được escape chống formula injection.
 
 4. **Định danh mã vạch & QR Code:**
    - Trường `label` của bảng `boxes` là duy nhất **trong phạm vi từng người dùng** (unique index `(user_id, label)`) để in tem QR dán lên hộp đựng.

@@ -42,7 +42,7 @@ internal/utils/        JWT, bcrypt password
 
 - **Mỗi query repository phải lọc theo `user_id`** (`Where("id = ? AND user_id = ?", id, userID)`). Signature repo nhận `userID uuid.UUID`.
 - Handler mẫu: lấy `userID, ok := middleware.GetCurrentUserID(c)` → nếu `!ok` trả 401 `UNAUTHORIZED` → `ShouldBindJSON` lỗi trả 400 `INVALID_INPUT` → gọi service → map lỗi sang code UPPER_SNAKE (`CREATE_FAILED`, `LEND_FAILED`, `NOT_FOUND`, `INTERNAL_ERROR`...).
-- Service trả lỗi bằng `errors.New("message dễ đọc")`; message này đi thẳng ra `error.message` cho client.
+- Service trả lỗi có loại bằng `internal/apperr` (`apperr.Invalid/NotFound/Conflict`); handler gọi `fail(c, "X_FAILED", err)` (`internal/handler/errors.go`) để map sang 400/404/409/500. Message của lỗi có loại đi ra `error.message`; lỗi khác trả 500 chung và chỉ log chi tiết.
 - Request DTO đặt trong file service (`CreateItemRequest`, `UpdateItemRequest`) hoặc handler (`MoveItemRequest`). Update dùng field con trỏ (`*string`, `*float64`) để phân biệt "không gửi" và "giá trị zero".
 - List luôn trả mảng rỗng `[]` chứ không phải `null`; slice/map JSONB phải được khởi tạo (model hooks đã lo khi đọc/tạo).
 - Field ảo cho response (`IsLowStock`, `BoxName`) dùng tag `gorm:"-"`; `IsLowStock` được tính trong `Item.AfterFind` — dùng `ComputeIsLowStock()`, đừng tính lại ở nơi khác.
@@ -50,7 +50,7 @@ internal/utils/        JWT, bcrypt password
 
 ## Khác biệt giữa code hiện tại và AGENTS.md (code là chân lý)
 
-- `purchaseDate`, `warrantyExpiryDate`, `expiryDate` của item lưu dạng **chuỗi `varchar(30)`** (`*string`), không phải TIMESTAMPTZ.
+- `purchaseDate`, `warrantyExpiryDate`, `expiryDate` của item lưu dạng **chuỗi `varchar(30)`** (`*string`), không phải TIMESTAMPTZ; service chuẩn hoá về `YYYY-MM-DD` khi ghi (`normalizeDate`).
 - Item có thêm `isConsumable bool` (chưa có trong spec).
 - Không có file SQL migration: schema do `db.AutoMigrate` + các lệnh `ALTER`/`CREATE INDEX IF NOT EXISTS` trong `internal/database/postgres.go` (bật khi `RUN_MIGRATIONS=true`). Thêm cột/index mới → thêm vào model và, nếu cần, vào khối raw SQL đó (phải idempotent). DDL trong AGENTS.md chỉ để tham khảo.
 - `boxes.label` duy nhất **theo từng user**: service kiểm tra bằng `GetByLabel(label, &userID)` và có unique index `uq_boxes_user_label (user_id, label)` (nếu DB cũ có nhãn trùng thì index không tạo được, chỉ log warning — cần dọn dữ liệu rồi chạy lại).

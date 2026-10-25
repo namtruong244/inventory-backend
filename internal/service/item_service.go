@@ -1,13 +1,39 @@
 package service
 
 import (
-	"errors"
+	"strings"
+	"time"
+
+	"inventory_backend/internal/apperr"
 
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
 
 	"github.com/google/uuid"
 )
+
+var validItemStatuses = map[string]bool{
+	"stored": true, "inUse": true, "lent": true, "broken": true, "disposed": true,
+}
+
+// normalizeDate accepts "YYYY-MM-DD" or an RFC3339 timestamp and stores only
+// the calendar date as written, so string comparison against dates is correct.
+func normalizeDate(field string, v *string) (*string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	raw := strings.TrimSpace(*v)
+	if raw == "" {
+		return nil, nil
+	}
+	for _, layout := range []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			d := t.Format("2006-01-02")
+			return &d, nil
+		}
+	}
+	return nil, apperr.Invalid(field + " must be a date in YYYY-MM-DD format")
+}
 
 type ItemService interface {
 	Create(userID uuid.UUID, req CreateItemRequest) (*models.Item, error)
@@ -48,6 +74,7 @@ type UpdateItemRequest struct {
 	Quantity           *float64               `json:"quantity"`
 	Unit               *string                `json:"unit"`
 	MinQuantity        *float64               `json:"minQuantity"`
+	ClearMinQuantity   bool                   `json:"clearMinQuantity"` // true removes the stock threshold
 	IsConsumable       *bool                  `json:"isConsumable"`
 	Status             *string                `json:"status"`
 	PurchasePrice      *float64               `json:"purchasePrice"`
@@ -93,12 +120,30 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 	// Verify target box exists
 	box, err := s.boxRepo.GetByID(req.BoxID, userID)
 	if err != nil || box == nil {
-		return nil, errors.New("target box does not exist or does not belong to you")
+		return nil, apperr.NotFound("target box does not exist or does not belong to you")
 	}
 
 	quantity := 1.0
 	if req.Quantity != nil {
 		quantity = *req.Quantity
+	}
+	if quantity < 0 {
+		return nil, apperr.Invalid("quantity cannot be negative")
+	}
+	if req.MinQuantity != nil && *req.MinQuantity < 0 {
+		return nil, apperr.Invalid("minQuantity cannot be negative")
+	}
+	purchaseDate, err := normalizeDate("purchaseDate", req.PurchaseDate)
+	if err != nil {
+		return nil, err
+	}
+	warrantyDate, err := normalizeDate("warrantyExpiryDate", req.WarrantyExpiryDate)
+	if err != nil {
+		return nil, err
+	}
+	expiryDate, err := normalizeDate("expiryDate", req.ExpiryDate)
+	if err != nil {
+		return nil, err
 	}
 
 	unit := "pcs"
@@ -113,6 +158,12 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 	status := "stored"
 	if req.Status != nil && *req.Status != "" {
 		status = *req.Status
+	}
+	if !validItemStatuses[status] {
+		return nil, apperr.Invalid("invalid status, must be one of: stored, inUse, broken, disposed")
+	}
+	if status == "lent" {
+		return nil, apperr.Invalid("status 'lent' can only be set by lending the item")
 	}
 
 	isConsumable := false
@@ -132,11 +183,11 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 		IsConsumable:       isConsumable,
 		Status:             status,
 		PurchasePrice:      req.PurchasePrice,
-		PurchaseDate:       req.PurchaseDate,
+		PurchaseDate:       purchaseDate,
 		SerialNumber:       req.SerialNumber,
 		Barcode:            req.Barcode,
-		WarrantyExpiryDate: req.WarrantyExpiryDate,
-		ExpiryDate:         req.ExpiryDate,
+		WarrantyExpiryDate: warrantyDate,
+		ExpiryDate:         expiryDate,
 		Photos:             req.Photos,
 		ReceiptPhotos:      req.ReceiptPhotos,
 		CustomAttributes:   req.CustomAttributes,
@@ -154,7 +205,7 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 func (s *itemService) GetByID(userID uuid.UUID, id uuid.UUID) (*ItemDetailResponse, error) {
 	item, err := s.itemRepo.GetByID(id, userID)
 	if err != nil {
-		return nil, errors.New("item not found")
+		return nil, apperr.NotFoundOr(err, "item not found")
 	}
 
 	item.IsLowStock = item.ComputeIsLowStock()
@@ -212,7 +263,7 @@ func (s *itemService) List(userID uuid.UUID, filter repository.ItemFilter) ([]mo
 func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemRequest) (*models.Item, error) {
 	item, err := s.itemRepo.GetByID(id, userID)
 	if err != nil {
-		return nil, errors.New("item not found")
+		return nil, apperr.NotFoundOr(err, "item not found")
 	}
 
 	if req.Name != nil {
@@ -224,7 +275,7 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 	if req.BoxID != nil && *req.BoxID != item.BoxID {
 		box, err := s.boxRepo.GetByID(*req.BoxID, userID)
 		if err != nil || box == nil {
-			return nil, errors.New("target box does not exist or does not belong to you")
+			return nil, apperr.NotFound("target box does not exist or does not belong to you")
 		}
 		item.BoxID = *req.BoxID
 	}
@@ -232,25 +283,44 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 		item.CategoryID = *req.CategoryID
 	}
 	if req.Quantity != nil {
+		if *req.Quantity < 0 {
+			return nil, apperr.Invalid("quantity cannot be negative")
+		}
 		item.Quantity = *req.Quantity
 	}
 	if req.Unit != nil {
 		item.Unit = *req.Unit
 	}
-	if req.MinQuantity != nil {
+	if req.ClearMinQuantity {
+		item.MinQuantity = nil
+	} else if req.MinQuantity != nil {
+		if *req.MinQuantity < 0 {
+			return nil, apperr.Invalid("minQuantity cannot be negative")
+		}
 		item.MinQuantity = req.MinQuantity
 	}
 	if req.IsConsumable != nil {
 		item.IsConsumable = *req.IsConsumable
 	}
-	if req.Status != nil {
+	if req.Status != nil && *req.Status != item.Status {
+		if !validItemStatuses[*req.Status] {
+			return nil, apperr.Invalid("invalid status, must be one of: stored, inUse, broken, disposed")
+		}
+		// 'lent' is owned by the lending flow so status and open loans never disagree.
+		if *req.Status == "lent" || item.Status == "lent" {
+			return nil, apperr.Invalid("status 'lent' can only be changed through the lending API")
+		}
 		item.Status = *req.Status
 	}
 	if req.PurchasePrice != nil {
 		item.PurchasePrice = req.PurchasePrice
 	}
 	if req.PurchaseDate != nil {
-		item.PurchaseDate = req.PurchaseDate
+		d, err := normalizeDate("purchaseDate", req.PurchaseDate)
+		if err != nil {
+			return nil, err
+		}
+		item.PurchaseDate = d
 	}
 	if req.SerialNumber != nil {
 		item.SerialNumber = req.SerialNumber
@@ -259,10 +329,18 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 		item.Barcode = req.Barcode
 	}
 	if req.WarrantyExpiryDate != nil {
-		item.WarrantyExpiryDate = req.WarrantyExpiryDate
+		d, err := normalizeDate("warrantyExpiryDate", req.WarrantyExpiryDate)
+		if err != nil {
+			return nil, err
+		}
+		item.WarrantyExpiryDate = d
 	}
 	if req.ExpiryDate != nil {
-		item.ExpiryDate = req.ExpiryDate
+		d, err := normalizeDate("expiryDate", req.ExpiryDate)
+		if err != nil {
+			return nil, err
+		}
+		item.ExpiryDate = d
 	}
 	if req.Photos != nil {
 		item.Photos = req.Photos
@@ -275,7 +353,7 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 	}
 
 	if err := s.itemRepo.Update(item); err != nil {
-		return nil, err
+		return nil, apperr.ConflictOnUnique(err, "item conflicts with an existing item")
 	}
 
 	item.IsLowStock = item.ComputeIsLowStock()
@@ -285,7 +363,7 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 func (s *itemService) Move(userID uuid.UUID, id uuid.UUID, targetBoxID uuid.UUID) error {
 	box, err := s.boxRepo.GetByID(targetBoxID, userID)
 	if err != nil || box == nil {
-		return errors.New("target box does not exist or does not belong to you")
+		return apperr.NotFound("target box does not exist or does not belong to you")
 	}
 
 	return s.itemRepo.Move(id, userID, targetBoxID)
@@ -293,7 +371,7 @@ func (s *itemService) Move(userID uuid.UUID, id uuid.UUID, targetBoxID uuid.UUID
 
 func (s *itemService) UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity float64) error {
 	if quantity < 0 {
-		return errors.New("quantity cannot be negative")
+		return apperr.Invalid("quantity cannot be negative")
 	}
 	return s.itemRepo.UpdateQuantity(id, userID, quantity)
 }

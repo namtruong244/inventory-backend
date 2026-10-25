@@ -1,0 +1,109 @@
+package service_test
+
+import (
+	"errors"
+	"testing"
+
+	"inventory_backend/internal/apperr"
+	"inventory_backend/internal/models"
+	"inventory_backend/internal/repository"
+	"inventory_backend/internal/service"
+
+	"github.com/google/uuid"
+)
+
+type mockItemRepo struct {
+	repository.ItemRepository
+	items map[uuid.UUID]*models.Item
+}
+
+func (m *mockItemRepo) Create(i *models.Item) error { i.ID = uuid.New(); m.items[i.ID] = i; return nil }
+func (m *mockItemRepo) GetByID(id, userID uuid.UUID) (*models.Item, error) {
+	if i, ok := m.items[id]; ok && i.UserID == userID {
+		cp := *i
+		return &cp, nil
+	}
+	return nil, errors.New("record not found")
+}
+func (m *mockItemRepo) Update(i *models.Item) error { m.items[i.ID] = i; return nil }
+
+func setupItemSvc(t *testing.T) (service.ItemService, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	userID := uuid.New()
+	boxes := newMockBoxRepo()
+	box := &models.Box{ID: uuid.New(), UserID: userID, Name: "b", Label: "b"}
+	boxes.boxes[box.ID] = box
+	svc := service.NewItemService(&mockItemRepo{items: map[uuid.UUID]*models.Item{}}, boxes, nil, nil)
+	return svc, userID, box.ID
+}
+
+func isInvalid(err error) bool {
+	e, ok := apperr.As(err)
+	return ok && e.Kind == apperr.KindInvalid
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func TestItemService_CreateValidation(t *testing.T) {
+	svc, userID, boxID := setupItemSvc(t)
+	base := func() service.CreateItemRequest {
+		return service.CreateItemRequest{Name: "n", BoxID: boxID, CategoryID: "c", Unit: ptr("pcs")}
+	}
+
+	cases := map[string]func(*service.CreateItemRequest){
+		"negative quantity": func(r *service.CreateItemRequest) { r.Quantity = ptr(-1.0) },
+		"unknown status":    func(r *service.CreateItemRequest) { r.Status = ptr("weird") },
+		"lent status":       func(r *service.CreateItemRequest) { r.Status = ptr("lent") },
+		"bad date":          func(r *service.CreateItemRequest) { r.ExpiryDate = ptr("not-a-date") },
+	}
+	for name, mutate := range cases {
+		req := base()
+		mutate(&req)
+		if _, err := svc.Create(userID, req); !isInvalid(err) {
+			t.Errorf("%s: expected invalid error, got %v", name, err)
+		}
+	}
+
+	req := base()
+	req.ExpiryDate = ptr("2026-12-31T23:59:00+07:00")
+	item, err := svc.Create(userID, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.ExpiryDate == nil || *item.ExpiryDate != "2026-12-31" {
+		t.Errorf("expiry date not normalized: %v", item.ExpiryDate)
+	}
+}
+
+func TestItemService_UpdateStatusAndMinQuantity(t *testing.T) {
+	svc, userID, boxID := setupItemSvc(t)
+	item, err := svc.Create(userID, service.CreateItemRequest{
+		Name: "n", BoxID: boxID, CategoryID: "c", Unit: ptr("pcs"), MinQuantity: ptr(3.0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Update(userID, item.ID, service.UpdateItemRequest{Status: ptr("lent")}); !isInvalid(err) {
+		t.Errorf("setting lent via update must be rejected, got %v", err)
+	}
+	if _, err := svc.Update(userID, item.ID, service.UpdateItemRequest{Quantity: ptr(-2.0)}); !isInvalid(err) {
+		t.Errorf("negative quantity must be rejected, got %v", err)
+	}
+
+	updated, err := svc.Update(userID, item.ID, service.UpdateItemRequest{ClearMinQuantity: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.MinQuantity != nil {
+		t.Errorf("minQuantity should be cleared")
+	}
+}
+
+func TestBoxService_RejectsUnknownType(t *testing.T) {
+	svc := service.NewBoxService(newMockBoxRepo(), nil)
+	_, err := svc.Create(uuid.New(), service.CreateBoxRequest{Name: "x", Type: "spaceship", Label: "L"})
+	if !isInvalid(err) {
+		t.Errorf("expected invalid error for unknown box type, got %v", err)
+	}
+}

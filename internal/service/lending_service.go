@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
 
@@ -45,6 +46,12 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 		lentDate = *req.LentDate
 	}
 
+	// Compare by day: clients send a date (midnight) for "expected return".
+	lentDay := time.Date(lentDate.Year(), lentDate.Month(), lentDate.Day(), 0, 0, 0, 0, lentDate.Location())
+	if req.ExpectedReturnDate != nil && req.ExpectedReturnDate.Before(lentDay) {
+		return nil, apperr.Invalid("expectedReturnDate cannot be before lentDate")
+	}
+
 	record := &models.LendingRecord{
 		UserID:             userID,
 		ItemID:             req.ItemID,
@@ -58,7 +65,7 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 	// Business Rule 3: Lending Integrity — checked and applied atomically in the repository
 	item, err := s.lendingRepo.LendItem(userID, record)
 	if err != nil {
-		return nil, err
+		return nil, translateLendingErr(err)
 	}
 
 	record.ItemName = item.Name
@@ -70,7 +77,22 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 }
 
 func (s *lendingService) ReturnItem(userID uuid.UUID, recordID uuid.UUID) error {
-	return s.lendingRepo.ReturnLoan(userID, recordID)
+	return translateLendingErr(s.lendingRepo.ReturnLoan(userID, recordID))
+}
+
+// translateLendingErr converts repository sentinels into typed business errors.
+func translateLendingErr(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, repository.ErrItemNotFound), errors.Is(err, repository.ErrLoanNotFound):
+		return apperr.NotFound(err.Error())
+	case errors.Is(err, repository.ErrItemAlreadyLent), errors.Is(err, repository.ErrLoanAlreadyClosed):
+		return apperr.Conflict(err.Error())
+	case errors.Is(err, repository.ErrItemNotLendable):
+		return apperr.Invalid(err.Error())
+	}
+	return err
 }
 
 func (s *lendingService) GetActiveLoans(userID uuid.UUID) ([]models.LendingRecord, error) {
@@ -85,7 +107,7 @@ func (s *lendingService) GetHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) 
 	// Verify item belongs to user
 	_, err := s.itemRepo.GetByID(itemID, userID)
 	if err != nil {
-		return nil, errors.New("item not found")
+		return nil, apperr.NotFound("item not found")
 	}
 	return s.lendingRepo.ListHistoryByItemID(userID, itemID)
 }

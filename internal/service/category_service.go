@@ -1,7 +1,7 @@
 package service
 
 import (
-	"errors"
+	"inventory_backend/internal/apperr"
 
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
@@ -48,12 +48,12 @@ func (s *categoryService) List(userID uuid.UUID) ([]CategoryResponse, error) {
 
 func (s *categoryService) Create(userID uuid.UUID, name string) (*CategoryResponse, error) {
 	if name == "" {
-		return nil, errors.New("category name is required")
+		return nil, apperr.Invalid("category name is required")
 	}
 
 	existing, _ := s.categoryRepo.GetByName(userID, name)
 	if existing != nil {
-		return nil, errors.New("category with this name already exists")
+		return nil, apperr.Conflict("category with this name already exists")
 	}
 
 	cat := &models.Category{

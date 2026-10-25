@@ -17,7 +17,9 @@ type LendingRecord struct {
 	ExpectedReturnDate *time.Time `json:"expectedReturnDate"`
 	ActualReturnDate   *time.Time `json:"actualReturnDate"`
 	Notes              string     `gorm:"type:text;default:''" json:"notes"`
-	CreatedAt          time.Time  `json:"createdAt"`
+	// PreviousStatus is the item status before lending; restored on return.
+	PreviousStatus string    `gorm:"size:30;default:''" json:"-"`
+	CreatedAt      time.Time `json:"createdAt"`
 
 	// Virtual fields for responses
 	ItemName string `gorm:"-" json:"itemName,omitempty"`
