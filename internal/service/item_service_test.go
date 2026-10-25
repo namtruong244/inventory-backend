@@ -3,6 +3,7 @@ package service_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/models"
@@ -26,6 +27,21 @@ func (m *mockItemRepo) GetByID(id, userID uuid.UUID) (*models.Item, error) {
 	return nil, errors.New("record not found")
 }
 func (m *mockItemRepo) Update(i *models.Item) error { m.items[i.ID] = i; return nil }
+func (m *mockItemRepo) UpdateQuantity(id, userID uuid.UUID, q float64) error {
+	m.items[id].Quantity = q
+	return nil
+}
+
+type memMovementRepo struct{ list []models.StockMovement }
+
+func (m *memMovementRepo) Create(mv *models.StockMovement) error {
+	mv.CreatedAt = time.Now().UTC()
+	m.list = append([]models.StockMovement{*mv}, m.list...)
+	return nil
+}
+func (m *memMovementRepo) ListByItem(_, _ uuid.UUID, _ int) ([]models.StockMovement, error) {
+	return m.list, nil
+}
 
 func setupItemSvc(t *testing.T) (service.ItemService, uuid.UUID, uuid.UUID) {
 	t.Helper()
@@ -33,7 +49,7 @@ func setupItemSvc(t *testing.T) (service.ItemService, uuid.UUID, uuid.UUID) {
 	boxes := newMockBoxRepo()
 	box := &models.Box{ID: uuid.New(), UserID: userID, Name: "b", Label: "b"}
 	boxes.boxes[box.ID] = box
-	svc := service.NewItemService(&mockItemRepo{items: map[uuid.UUID]*models.Item{}}, boxes, nil, nil)
+	svc := service.NewItemService(&mockItemRepo{items: map[uuid.UUID]*models.Item{}}, boxes, nil, nil, anyCategoryRepo{}, &memMovementRepo{})
 	return svc, userID, box.ID
 }
 
@@ -105,5 +121,45 @@ func TestBoxService_RejectsUnknownType(t *testing.T) {
 	_, err := svc.Create(uuid.New(), service.CreateBoxRequest{Name: "x", Type: "spaceship", Label: "L"})
 	if !isInvalid(err) {
 		t.Errorf("expected invalid error for unknown box type, got %v", err)
+	}
+}
+
+// anyCategoryRepo resolves every category value to itself.
+type anyCategoryRepo struct{}
+
+func (anyCategoryRepo) List(uuid.UUID) ([]models.Category, error) { return nil, nil }
+func (anyCategoryRepo) Create(*models.Category) error             { return nil }
+func (anyCategoryRepo) DeleteByName(uuid.UUID, string) error      { return nil }
+func (anyCategoryRepo) GetByName(_ uuid.UUID, n string) (*models.Category, error) {
+	return &models.Category{Name: n}, nil
+}
+func (anyCategoryRepo) Resolve(_ uuid.UUID, v string) (*models.Category, error) {
+	return &models.Category{Name: v}, nil
+}
+
+func TestItemService_UpdateQuantityRecordsMovement(t *testing.T) {
+	svc, userID, boxID := setupItemSvc(t)
+	item, err := svc.Create(userID, service.CreateItemRequest{Name: "n", BoxID: boxID, CategoryID: "c", Unit: ptr("pcs"), Quantity: ptr(10.0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateQuantity(userID, item.ID, 4, "consume", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateQuantity(userID, item.ID, 4, "bogus", ""); !isInvalid(err) {
+		t.Fatalf("want invalid reason, got %v", err)
+	}
+	h, err := svc.Movements(userID, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Movements) != 2 || h.Movements[0].Delta != -6 || h.Movements[0].QuantityAfter != 4 {
+		t.Fatalf("unexpected movements: %+v", h.Movements)
+	}
+	if h.EstimatedDaysLeft == nil || h.AvgDailyConsumption30d != 6.0/30 {
+		t.Fatalf("unexpected estimate: %+v", h)
+	}
+	if _, err := svc.Movements(uuid.New(), item.ID); err == nil {
+		t.Fatal("other user must not read movements")
 	}
 }

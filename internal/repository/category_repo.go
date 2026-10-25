@@ -1,8 +1,9 @@
 package repository
 
 import (
-	"errors"
+	"fmt"
 
+	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/models"
 
 	"github.com/google/uuid"
@@ -14,6 +15,8 @@ type CategoryRepository interface {
 	Create(cat *models.Category) error
 	DeleteByName(userID uuid.UUID, name string) error
 	GetByName(userID uuid.UUID, name string) (*models.Category, error)
+	// Resolve finds a category visible to the user by name (case-insensitive) or by id.
+	Resolve(userID uuid.UUID, value string) (*models.Category, error)
 }
 
 type categoryRepo struct {
@@ -45,15 +48,35 @@ func (r *categoryRepo) GetByName(userID uuid.UUID, name string) (*models.Categor
 	return &cat, nil
 }
 
+func (r *categoryRepo) Resolve(userID uuid.UUID, value string) (*models.Category, error) {
+	if id, err := uuid.Parse(value); err == nil {
+		var cat models.Category
+		if err := r.db.Where("id = ? AND (is_default = true OR user_id = ?)", id, userID).First(&cat).Error; err == nil {
+			return &cat, nil
+		}
+	}
+	return r.GetByName(userID, value)
+}
+
 func (r *categoryRepo) DeleteByName(userID uuid.UUID, name string) error {
 	var cat models.Category
 	err := r.db.Where("LOWER(name) = LOWER(?) AND (is_default = true OR user_id = ?)", name, userID).First(&cat).Error
 	if err != nil {
-		return err
+		return apperr.NotFoundOr(err, "category not found")
 	}
 
 	if cat.IsDefault {
-		return errors.New("cannot delete system default category")
+		return apperr.Invalid("cannot delete system default category")
+	}
+
+	var used int64
+	if err := r.db.Model(&models.Item{}).
+		Where("user_id = ? AND LOWER(category_id) = LOWER(?)", userID, cat.Name).
+		Count(&used).Error; err != nil {
+		return err
+	}
+	if used > 0 {
+		return apperr.Conflict(fmt.Sprintf("category is used by %d item(s); change their category first", used))
 	}
 
 	return r.db.Delete(&cat).Error

@@ -14,7 +14,7 @@ import (
 var (
 	ErrItemNotFound      = errors.New("item not found")
 	ErrItemAlreadyLent   = errors.New("item is already currently lent out")
-	ErrItemNotLendable   = errors.New("cannot lend an item with status broken or disposed")
+	ErrItemNotLendable   = errors.New("cannot lend an item with status broken, disposed or lost")
 	ErrLoanNotFound      = errors.New("lending record not found")
 	ErrLoanAlreadyClosed = errors.New("item has already been returned")
 )
@@ -84,7 +84,7 @@ func (r *lendingRepo) LendItem(userID uuid.UUID, record *models.LendingRecord) (
 		switch item.Status {
 		case "lent":
 			return ErrItemAlreadyLent
-		case "broken", "disposed":
+		case "broken", "disposed", "lost":
 			return ErrItemNotLendable
 		}
 

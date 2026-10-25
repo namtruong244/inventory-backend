@@ -414,6 +414,8 @@ Lấy toàn bộ cấu hình hiển thị và tùy chọn cảnh báo của ngư
       "currencySymbol": "$",
       "defaultUnit": "pcs",
       "expiryWarningDays": 30,
+      "warrantyWarningDays": 30,
+      "timezone": "UTC",
       "notifyExpiring": true,
       "notifyOverdue": true,
       "notifyLowStock": true,
@@ -432,9 +434,12 @@ Cập nhật tùy chọn hiển thị và cảnh báo của người dùng.
     "currencySymbol": "₫",
     "defaultUnit": "cái",
     "expiryWarningDays": 15,
+    "warrantyWarningDays": 45,
+    "timezone": "Asia/Ho_Chi_Minh",
     "notifyLowStock": true
   }
   ```
+  `expiryWarningDays`/`warrantyWarningDays` trong khoảng 1..3650. `timezone` là tên IANA hợp lệ (không nhận `""`/`Local`); "hôm nay" của cảnh báo, báo cáo và lọc hạn dùng múi giờ này.
 - **Response 200 OK:**
   ```json
   {
@@ -500,7 +505,9 @@ Tạo danh mục phân loại mới.
   ```
 
 #### `DELETE /api/v1/categories/:name`
-Xóa danh mục tự tạo (chặn không cho phép xóa danh mục hệ thống `is_default = true`).
+Xóa danh mục tự tạo. Lỗi: 400 nếu là danh mục hệ thống (`is_default = true`), 404 nếu không tồn tại, 409 nếu còn vật phẩm đang dùng danh mục ("category is used by N item(s)").
+
+Khi tạo/sửa item, `categoryId` (tên hoặc id) phải tồn tại trong danh mục mặc định hoặc của user, nếu không trả 400 `category does not exist`; giá trị lưu là **tên** danh mục.
 
 ---
 
@@ -696,9 +703,12 @@ Cập nhật nhanh số lượng tồn kho (tăng/giảm trực tiếp khi xuấ
 - **Request Body:**
   ```json
   {
-    "quantity": 3.0
+    "quantity": 3.0,
+    "reason": "consume",
+    "note": "optional"
   }
   ```
+  `reason` (tuỳ chọn, mặc định `adjust`): `restock | consume | damaged | lost | correction | adjust`; giá trị khác trả 400. Mỗi lần số lượng đổi ghi một dòng `stock_movements`.
 - **Response 200 OK:**
   ```json
   {
@@ -707,6 +717,23 @@ Cập nhật nhanh số lượng tồn kho (tăng/giảm trực tiếp khi xuấ
     "message": "Quantity updated successfully"
   }
   ```
+
+#### `GET /api/v1/items/:id/movements`
+Lịch sử xuất/nhập kho (tối đa 200 dòng, mới nhất trước) và ước tính tiêu thụ.
+- **Response 200 OK:**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "movements": [
+        { "id": "...", "itemId": "...", "delta": -6, "quantityAfter": 4, "reason": "consume", "note": "", "createdAt": "..." }
+      ],
+      "avgDailyConsumption30d": 0.2,
+      "estimatedDaysLeft": 20
+    }
+  }
+  ```
+  `reason` còn có `initial` (lúc tạo) và `move` (đổi vị trí, `delta = 0`). `avgDailyConsumption30d` chỉ tính các dòng `consume` trong 30 ngày; `estimatedDaysLeft = null` khi chưa có dữ liệu tiêu thụ. Xoá item xoá luôn lịch sử.
 
 #### `PATCH /api/v1/items/:id/move`
 Chuyển vật phẩm sang thùng/vị trí lưu trữ mới.

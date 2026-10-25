@@ -55,6 +55,11 @@ internal/utils/        JWT, bcrypt password
 - Không có file SQL migration: schema do `db.AutoMigrate` + các lệnh `ALTER`/`CREATE INDEX IF NOT EXISTS` trong `internal/database/postgres.go` (bật khi `RUN_MIGRATIONS=true`). Thêm cột/index mới → thêm vào model và, nếu cần, vào khối raw SQL đó (phải idempotent). DDL trong AGENTS.md chỉ để tham khảo.
 - `boxes.label` duy nhất **theo từng user**: service kiểm tra bằng `GetByLabel(label, &userID)` và có unique index `uq_boxes_user_label (user_id, label)` (nếu DB cũ có nhãn trùng thì index không tạo được, chỉ log warning — cần dọn dữ liệu rồi chạy lại).
 - Lending dùng transaction + `SELECT ... FOR UPDATE` trong `LendingRepository.LendItem/ReturnLoan` và partial unique index `uq_lending_open_item` (mỗi item tối đa 1 khoản mượn đang mở). `GET /items` giới hạn `limit` ≤ 200 (FE dùng `getAllItems()` để phân trang).
+- Item status có thêm `lost` (không cho mượn, không tính vào tổng giá trị). Settings có `warrantyWarningDays` và `timezone` (IANA); "hôm nay" tính bằng `utils.TodayIn(tz)`.
+- `categoryId` của item lưu **tên** danh mục; `ItemService` kiểm tra qua `CategoryRepository.Resolve`, xoá danh mục đang dùng trả 409.
+- `stock_movements` ghi lịch sử số lượng (best-effort, không làm hỏng thao tác chính); `GET /items/:id/movements`.
+- Index trigram (`pg_trgm`) cho tìm kiếm tên/mô tả là best-effort: thiếu extension chỉ log cảnh báo.
+- Lambda dựng DB một lần mỗi cold start (`init()` trong `cmd/lambda/main.go`), không mở lại mỗi request.
 - Upload (`/media/upload`): tối đa 10 MB, nội dung file được sniff và phải khớp đuôi file.
 
 ## Auth
@@ -69,7 +74,10 @@ internal/utils/        JWT, bcrypt password
 - Unit test cạnh file nguồn (`*_test.go`), package `xxx_test`, mock repository bằng struct in-memory tự viết — không có DB thật, không dùng thư viện mock.
 - Logic mới ở service (đặc biệt cycle prevention, lending integrity, low stock) phải có test.
 
+- Test tích hợp Postgres thật: `internal/app/integration_test.go`, chỉ chạy khi có `INTEGRATION_DB_NAME` (dùng DB tạm): `INTEGRATION_DB_NAME=inventory_it go test ./internal/app/`.
+
 ## Deploy
 
+- `.github/workflows/ci.yml`: PR/branch khác main chạy gofmt, vet, test.
 - `.github/workflows/deploy.yml`: push `main`/`master` → `go test` → build `cmd/lambda` → `aws lambda update-function-code`. Đừng push khi chưa được yêu cầu.
 - Lambda: giữ `DB_MAX_OPEN_CONNS` thấp (2–5); storage nên là `r2` vì filesystem Lambda không bền.

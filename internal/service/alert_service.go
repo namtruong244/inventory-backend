@@ -1,10 +1,10 @@
 package service
 
 import (
-	"time"
-
+	"database/sql"
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
+	"inventory_backend/internal/utils"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -51,102 +51,103 @@ func NewAlertService(db *gorm.DB, settingsRepo repository.SettingsRepository, le
 	}
 }
 
+// alertWindow holds the date boundaries (YYYY-MM-DD, in the user's timezone) used by every alert query.
+type alertWindow struct {
+	today, expirySoon, warrantySoon string
+}
+
+func (s *alertService) window(userID uuid.UUID) alertWindow {
+	expiryDays, warrantyDays, tz := 30, 30, "UTC"
+	if settings, err := s.settingsRepo.GetByUserID(userID); err == nil && settings != nil {
+		if settings.ExpiryWarningDays > 0 {
+			expiryDays = settings.ExpiryWarningDays
+		}
+		if settings.WarrantyWarningDays > 0 {
+			warrantyDays = settings.WarrantyWarningDays
+		}
+		tz = settings.Timezone
+	}
+	return alertWindow{
+		today:        utils.TodayIn(tz),
+		expirySoon:   utils.DateAfter(tz, expiryDays),
+		warrantySoon: utils.DateAfter(tz, warrantyDays),
+	}
+}
+
 func (s *alertService) GetSummary(userID uuid.UUID) (*AlertSummaryResponse, error) {
-	settings, _ := s.settingsRepo.GetByUserID(userID)
-	warningDays := 30
-	if settings != nil && settings.ExpiryWarningDays > 0 {
-		warningDays = settings.ExpiryWarningDays
+	w := s.window(userID)
+
+	var counts struct {
+		Expired      int64
+		ExpiringSoon int64
+		Warranty     int64
+		LowStock     int64
+	}
+	// One pass over the user's items instead of one COUNT query per alert type
+	err := s.db.Model(&models.Item{}).
+		Select(`COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < @today) AS expired,
+			COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= @today AND expiry_date <= @soon) AS expiring_soon,
+			COUNT(*) FILTER (WHERE warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= @today AND warranty_expiry_date <= @warranty) AS warranty,
+			COUNT(*) FILTER (WHERE min_quantity IS NOT NULL AND quantity <= min_quantity) AS low_stock`,
+			sql.Named("today", w.today), sql.Named("soon", w.expirySoon), sql.Named("warranty", w.warrantySoon)).
+		Where("user_id = ?", userID).
+		Scan(&counts).Error
+	if err != nil {
+		return nil, err
 	}
 
-	today := time.Now().UTC().Format("2006-01-02")
-	soonDate := time.Now().UTC().AddDate(0, 0, warningDays).Format("2006-01-02")
-	warrantySoonDate := time.Now().UTC().AddDate(0, 0, 30).Format("2006-01-02")
+	overdueLoansCount, err := s.lendingRepo.CountOverdue(userID)
+	if err != nil {
+		return nil, err
+	}
 
-	var expiredCount, expiringSoonCount, warrantyEndingCount, lowStockCount int64
-
-	// Expired items
-	s.db.Model(&models.Item{}).
-		Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < ?", userID, today).
-		Count(&expiredCount)
-
-	// Expiring soon items
-	s.db.Model(&models.Item{}).
-		Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= ? AND expiry_date <= ?", userID, today, soonDate).
-		Count(&expiringSoonCount)
-
-	// Warranty ending soon items
-	s.db.Model(&models.Item{}).
-		Where("user_id = ? AND warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= ? AND warranty_expiry_date <= ?", userID, today, warrantySoonDate).
-		Count(&warrantyEndingCount)
-
-	// Low stock items
-	s.db.Model(&models.Item{}).
-		Where("user_id = ? AND min_quantity IS NOT NULL AND quantity <= min_quantity", userID).
-		Count(&lowStockCount)
-
-	// Overdue loans
-	overdueLoansCount, _ := s.lendingRepo.CountOverdue(userID)
-
-	totalAlerts := int(expiredCount + expiringSoonCount + warrantyEndingCount + overdueLoansCount + lowStockCount)
+	totalAlerts := int(counts.Expired + counts.ExpiringSoon + counts.Warranty + overdueLoansCount + counts.LowStock)
 
 	return &AlertSummaryResponse{
 		TotalAlerts:           totalAlerts,
 		OverdueCount:          int(overdueLoansCount),
-		ExpiredCount:          int(expiredCount),
-		ExpiringSoonCount:     int(expiringSoonCount),
-		LowStockCount:         int(lowStockCount),
-		ExpiringWarrantyCount: int(warrantyEndingCount),
+		ExpiredCount:          int(counts.Expired),
+		ExpiringSoonCount:     int(counts.ExpiringSoon),
+		LowStockCount:         int(counts.LowStock),
+		ExpiringWarrantyCount: int(counts.Warranty),
 
 		// Backward compatibility
 		TotalAlertCount:     totalAlerts,
 		OverdueLoansCount:   int(overdueLoansCount),
-		WarrantyEndingCount: int(warrantyEndingCount),
+		WarrantyEndingCount: int(counts.Warranty),
 	}, nil
 }
 
 func (s *alertService) GetAll(userID uuid.UUID) (*AlertAllResponse, error) {
-	settings, _ := s.settingsRepo.GetByUserID(userID)
-	warningDays := 30
-	if settings != nil && settings.ExpiryWarningDays > 0 {
-		warningDays = settings.ExpiryWarningDays
+	w := s.window(userID)
+
+	expiredItems := []models.Item{}
+	if err := s.db.Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < ?", userID, w.today).
+		Order("expiry_date ASC").Find(&expiredItems).Error; err != nil {
+		return nil, err
 	}
 
-	today := time.Now().UTC().Format("2006-01-02")
-	soonDate := time.Now().UTC().AddDate(0, 0, warningDays).Format("2006-01-02")
-	warrantySoonDate := time.Now().UTC().AddDate(0, 0, 30).Format("2006-01-02")
+	expiringSoonItems := []models.Item{}
+	if err := s.db.Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= ? AND expiry_date <= ?", userID, w.today, w.expirySoon).
+		Order("expiry_date ASC").Find(&expiringSoonItems).Error; err != nil {
+		return nil, err
+	}
 
-	var expiredItems []models.Item
-	s.db.Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < ?", userID, today).
-		Order("expiry_date ASC").Find(&expiredItems)
+	warrantyEndingItems := []models.Item{}
+	if err := s.db.Where("user_id = ? AND warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= ? AND warranty_expiry_date <= ?", userID, w.today, w.warrantySoon).
+		Order("warranty_expiry_date ASC").Find(&warrantyEndingItems).Error; err != nil {
+		return nil, err
+	}
 
-	var expiringSoonItems []models.Item
-	s.db.Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= ? AND expiry_date <= ?", userID, today, soonDate).
-		Order("expiry_date ASC").Find(&expiringSoonItems)
-
-	var warrantyEndingItems []models.Item
-	s.db.Where("user_id = ? AND warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= ? AND warranty_expiry_date <= ?", userID, today, warrantySoonDate).
-		Order("warranty_expiry_date ASC").Find(&warrantyEndingItems)
-
-	var lowStockItems []models.Item
-	s.db.Where("user_id = ? AND min_quantity IS NOT NULL AND quantity <= min_quantity", userID).
-		Order("quantity ASC").Find(&lowStockItems)
+	lowStockItems := []models.Item{}
+	if err := s.db.Where("user_id = ? AND min_quantity IS NOT NULL AND quantity <= min_quantity", userID).
+		Order("quantity ASC").Find(&lowStockItems).Error; err != nil {
+		return nil, err
+	}
 
 	overdueLoans, err := s.lendingRepo.ListOverdue(userID)
 	if err != nil {
-		overdueLoans = []models.LendingRecord{}
-	}
-
-	if expiredItems == nil {
-		expiredItems = []models.Item{}
-	}
-	if expiringSoonItems == nil {
-		expiringSoonItems = []models.Item{}
-	}
-	if warrantyEndingItems == nil {
-		warrantyEndingItems = []models.Item{}
-	}
-	if lowStockItems == nil {
-		lowStockItems = []models.Item{}
+		return nil, err
 	}
 
 	return &AlertAllResponse{

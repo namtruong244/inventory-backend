@@ -53,6 +53,7 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			&models.Box{},
 			&models.Item{},
 			&models.LendingRecord{},
+			&models.StockMovement{},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("database migration failed: %w", err)
@@ -76,6 +77,11 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			"CREATE INDEX IF NOT EXISTS idx_items_custom_attributes ON items USING gin (custom_attributes);",
 			"CREATE INDEX IF NOT EXISTS idx_lending_active ON lending_records(user_id, actual_return_date);",
 
+			"CREATE INDEX IF NOT EXISTS idx_items_user_status ON items(user_id, status);",
+			"CREATE INDEX IF NOT EXISTS idx_items_user_expiry ON items(user_id, expiry_date);",
+			"CREATE INDEX IF NOT EXISTS idx_items_user_warranty ON items(user_id, warranty_expiry_date);",
+			"CREATE INDEX IF NOT EXISTS idx_items_user_created ON items(user_id, created_at DESC);",
+
 			// Box labels are unique per user (scan lookup resolves labels within one user)
 			"CREATE UNIQUE INDEX IF NOT EXISTS uq_boxes_user_label ON boxes(user_id, label);",
 			// An item can have at most one open loan (guards against concurrent lend requests)
@@ -89,6 +95,19 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		for _, stmt := range statements {
 			if err := db.Exec(stmt).Error; err != nil {
 				return nil, fmt.Errorf("database migration statement failed (%.60s...): %w", stmt, err)
+			}
+		}
+
+		// Trigram indexes make ILIKE '%q%' search index-assisted. pg_trgm needs a
+		// privileged role on some hosts, so this is best-effort: search still works without it.
+		for _, stmt := range []string{
+			"CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+			"CREATE INDEX IF NOT EXISTS idx_items_name_trgm ON items USING gin (name gin_trgm_ops);",
+			"CREATE INDEX IF NOT EXISTS idx_items_description_trgm ON items USING gin (description gin_trgm_ops);",
+		} {
+			if err := db.Exec(stmt).Error; err != nil {
+				log.Printf("Warning: optional search index skipped (%.50s...): %v\n", stmt, err)
+				break
 			}
 		}
 

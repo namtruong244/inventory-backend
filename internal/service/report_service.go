@@ -1,6 +1,7 @@
 package service
 
 import (
+	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
+	"inventory_backend/internal/utils"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -71,32 +73,39 @@ func (s *reportService) GetInventoryHealth(userID uuid.UUID) (*InventoryHealthRe
 		return nil, err
 	}
 
-	var storedCount, inUseCount, lentCount, lowStockCount, expiredCount, expiringSoonCount int64
-
-	s.db.Model(&models.Item{}).Where("user_id = ? AND status = 'stored'", userID).Count(&storedCount)
-	s.db.Model(&models.Item{}).Where("user_id = ? AND status = 'inUse'", userID).Count(&inUseCount)
-	s.db.Model(&models.Item{}).Where("user_id = ? AND status = 'lent'", userID).Count(&lentCount)
-	s.db.Model(&models.Item{}).Where("user_id = ? AND min_quantity IS NOT NULL AND quantity <= min_quantity", userID).Count(&lowStockCount)
-
-	settings, _ := s.settingsRepo.GetByUserID(userID)
-	warningDays := 30
-	if settings != nil && settings.ExpiryWarningDays > 0 {
-		warningDays = settings.ExpiryWarningDays
+	expiryDays, tz := 30, "UTC"
+	if settings, err := s.settingsRepo.GetByUserID(userID); err == nil && settings != nil {
+		if settings.ExpiryWarningDays > 0 {
+			expiryDays = settings.ExpiryWarningDays
+		}
+		tz = settings.Timezone
 	}
+	today := utils.TodayIn(tz)
+	soonDate := utils.DateAfter(tz, expiryDays)
 
-	today := time.Now().UTC().Format("2006-01-02")
-	soonDate := time.Now().UTC().AddDate(0, 0, warningDays).Format("2006-01-02")
-
-	s.db.Model(&models.Item{}).
-		Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < ?", userID, today).
-		Count(&expiredCount)
-
-	s.db.Model(&models.Item{}).
-		Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= ? AND expiry_date <= ?", userID, today, soonDate).
-		Count(&expiringSoonCount)
+	var counts struct {
+		Stored, InUse, Lent, LowStock, Expired, ExpiringSoon int64
+	}
+	// One pass over the user's items instead of six COUNT queries
+	if err := s.db.Model(&models.Item{}).
+		Select(`COUNT(*) FILTER (WHERE status = 'stored') AS stored,
+			COUNT(*) FILTER (WHERE status = 'inUse') AS in_use,
+			COUNT(*) FILTER (WHERE status = 'lent') AS lent,
+			COUNT(*) FILTER (WHERE min_quantity IS NOT NULL AND quantity <= min_quantity) AS low_stock,
+			COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < @today) AS expired,
+			COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= @today AND expiry_date <= @soon) AS expiring_soon`,
+			sql.Named("today", today), sql.Named("soon", soonDate)).
+		Where("user_id = ?", userID).
+		Scan(&counts).Error; err != nil {
+		return nil, err
+	}
+	storedCount, inUseCount, lentCount := counts.Stored, counts.InUse, counts.Lent
+	lowStockCount, expiredCount, expiringSoonCount := counts.LowStock, counts.Expired, counts.ExpiringSoon
 
 	var storageLocationsCount int64
-	s.db.Model(&models.Box{}).Where("user_id = ?", userID).Count(&storageLocationsCount)
+	if err := s.db.Model(&models.Box{}).Where("user_id = ?", userID).Count(&storageLocationsCount).Error; err != nil {
+		return nil, err
+	}
 
 	return &InventoryHealthResponse{
 		TotalAssetsCount:    int(totalAssetsCount),
