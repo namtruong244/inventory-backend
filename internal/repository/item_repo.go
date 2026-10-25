@@ -13,6 +13,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// LowStockCond is the SQL form of Item.ComputeIsLowStock. Units out on a partial
+// loan still belong to the user, so they count toward the stock level.
+const LowStockCond = `min_quantity IS NOT NULL AND quantity + COALESCE((SELECT SUM(l.quantity) FROM lending_records l
+	WHERE l.item_id = items.id AND l.is_partial AND l.actual_return_date IS NULL), 0) <= min_quantity`
+
 type ItemFilter struct {
 	Q                 string
 	BoxID             *uuid.UUID
@@ -28,6 +33,14 @@ type ItemFilter struct {
 	Limit int
 }
 
+// QuantityChange is either an absolute Set or a relative Delta (exactly one).
+type QuantityChange struct {
+	Set    *float64
+	Delta  *float64
+	Reason string
+	Note   string
+}
+
 type ItemRepository interface {
 	Create(item *models.Item) error
 	GetByID(id uuid.UUID, userID uuid.UUID) (*models.Item, error)
@@ -35,7 +48,9 @@ type ItemRepository interface {
 	List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int64, error)
 	Update(item *models.Item) error
 	Delete(id uuid.UUID, userID uuid.UUID) error
-	UpdateQuantity(id uuid.UUID, userID uuid.UUID, quantity float64) error
+	// ChangeQuantity locks the row, applies the change and writes the stock movement in one
+	// transaction. It returns the updated item and the delta actually applied.
+	ChangeQuantity(id uuid.UUID, userID uuid.UUID, c QuantityChange) (*models.Item, float64, error)
 	Move(id uuid.UUID, userID uuid.UUID, targetBoxID uuid.UUID) error
 	CountByUserID(userID uuid.UUID) (int64, error)
 	GetTotalEstimatedValue(userID uuid.UUID) (float64, error)
@@ -59,7 +74,40 @@ func (r *itemRepo) GetByID(id uuid.UUID, userID uuid.UUID) (*models.Item, error)
 	if err != nil {
 		return nil, err
 	}
+	r.fillLent([]*models.Item{&item})
 	return &item, nil
+}
+
+// fillLent sets LentQuantity (open partial loans) and re-derives IsLowStock.
+func (r *itemRepo) fillLent(items []*models.Item) { FillLent(r.db, items) }
+
+// FillLent is fillLent for callers that load items outside the repository.
+func FillLent(db *gorm.DB, items []*models.Item) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]uuid.UUID, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	var rows []struct {
+		ItemID uuid.UUID
+		Total  float64
+	}
+	if err := db.Model(&models.LendingRecord{}).
+		Select("item_id, SUM(quantity) AS total").
+		Where("item_id IN ? AND is_partial AND actual_return_date IS NULL", ids).
+		Group("item_id").Scan(&rows).Error; err != nil {
+		return
+	}
+	lent := make(map[uuid.UUID]float64, len(rows))
+	for _, row := range rows {
+		lent[row.ItemID] = row.Total
+	}
+	for _, it := range items {
+		it.LentQuantity = lent[it.ID]
+		it.IsLowStock = it.ComputeIsLowStock()
+	}
 }
 
 func (r *itemRepo) GetByCode(code string, userID *uuid.UUID) (*models.Item, error) {
@@ -75,6 +123,7 @@ func (r *itemRepo) GetByCode(code string, userID *uuid.UUID) (*models.Item, erro
 		var uItem models.Item
 		uQuery := query.Where("id = ?", parsedUUID)
 		if err := uQuery.First(&uItem).Error; err == nil {
+			r.fillLent([]*models.Item{&uItem})
 			return &uItem, nil
 		}
 	}
@@ -83,6 +132,7 @@ func (r *itemRepo) GetByCode(code string, userID *uuid.UUID) (*models.Item, erro
 	if err != nil {
 		return nil, err
 	}
+	r.fillLent([]*models.Item{&item})
 	return &item, nil
 }
 
@@ -111,7 +161,7 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 	}
 
 	if filter.IsLowStock != nil && *filter.IsLowStock {
-		query = query.Where("min_quantity IS NOT NULL AND quantity <= min_quantity")
+		query = query.Where(LowStockCond)
 	}
 
 	nowStr := filter.Today
@@ -150,6 +200,12 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 	if err != nil {
 		return nil, 0, err
 	}
+
+	ptrs := make([]*models.Item, len(items))
+	for i := range items {
+		ptrs[i] = &items[i]
+	}
+	r.fillLent(ptrs)
 
 	// Fetch box names for items
 	if len(items) > 0 {
@@ -216,20 +272,41 @@ func (r *itemRepo) Delete(id uuid.UUID, userID uuid.UUID) error {
 	})
 }
 
-func (r *itemRepo) UpdateQuantity(id uuid.UUID, userID uuid.UUID, quantity float64) error {
-	res := r.db.Model(&models.Item{}).
-		Where("id = ? AND user_id = ?", id, userID).
-		Updates(map[string]interface{}{
-			"quantity":   quantity,
-			"updated_at": time.Now().UTC(),
-		})
-	if res.Error != nil {
-		return res.Error
+func (r *itemRepo) ChangeQuantity(id uuid.UUID, userID uuid.UUID, c QuantityChange) (*models.Item, float64, error) {
+	var item models.Item
+	var applied float64
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", id, userID).First(&item).Error; err != nil {
+			return apperr.NotFoundOr(err, "item not found")
+		}
+		next := item.Quantity
+		switch {
+		case c.Delta != nil:
+			next += *c.Delta
+		case c.Set != nil:
+			next = *c.Set
+		}
+		if next < 0 {
+			return apperr.Invalid("quantity cannot be negative")
+		}
+		applied = next - item.Quantity
+		if applied == 0 {
+			return nil
+		}
+		item.Quantity = next
+		if err := tx.Model(&models.Item{}).Where("id = ? AND user_id = ?", id, userID).
+			Updates(map[string]interface{}{"quantity": next, "updated_at": time.Now().UTC()}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.StockMovement{UserID: userID, ItemID: id, Delta: applied,
+			QuantityAfter: next, Reason: c.Reason, Note: c.Note}).Error
+	})
+	if err != nil {
+		return nil, 0, err
 	}
-	if res.RowsAffected == 0 {
-		return apperr.NotFound("item not found")
-	}
-	return nil
+	r.fillLent([]*models.Item{&item})
+	return &item, applied, nil
 }
 
 func (r *itemRepo) Move(id uuid.UUID, userID uuid.UUID, targetBoxID uuid.UUID) error {

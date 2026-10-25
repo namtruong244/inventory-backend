@@ -2,7 +2,9 @@ package handler
 
 import (
 	"net/http"
+	"time"
 
+	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/middleware"
 	"inventory_backend/internal/service"
 
@@ -11,16 +13,21 @@ import (
 
 type AuthHandler struct {
 	authService service.AuthService
+	// loginByEmail throttles guessing against a single account regardless of IP.
+	loginByEmail *middleware.RateLimiter
 }
 
 func NewAuthHandler(authService service.AuthService) *AuthHandler {
-	return &AuthHandler{authService: authService}
+	return &AuthHandler{
+		authService:  authService,
+		loginByEmail: middleware.NewRateLimiter(10, 15*time.Minute),
+	}
 }
 
 type RegisterRequest struct {
 	Name     string `json:"name" binding:"required"`
 	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=6"`
+	Password string `json:"password" binding:"required,min=8"`
 }
 
 type LoginRequest struct {
@@ -42,13 +49,13 @@ type GoogleLoginRequest struct {
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		SendError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error(), nil)
+		SendError(c, http.StatusBadRequest, "INVALID_INPUT", "Invalid request body", nil)
 		return
 	}
 
 	result, err := h.authService.Register(req.Name, req.Email, req.Password)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "REGISTRATION_FAILED", err.Error(), nil)
+		fail(c, "REGISTRATION_FAILED", err)
 		return
 	}
 
@@ -58,23 +65,37 @@ func (h *AuthHandler) Register(c *gin.Context) {
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		SendError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error(), nil)
+		SendError(c, http.StatusBadRequest, "INVALID_INPUT", "Invalid request body", nil)
+		return
+	}
+
+	// Only failed attempts count, and per (email, IP): a stranger cannot lock
+	// the owner out, and a successful login clears the counter.
+	limitKey := middleware.EmailIPKey(req.Email, c.ClientIP())
+	if h.loginByEmail.Blocked(limitKey) {
+		middleware.Reject(c)
 		return
 	}
 
 	result, err := h.authService.Login(req.Email, req.Password)
 	if err != nil {
-		SendError(c, http.StatusUnauthorized, "AUTH_FAILED", err.Error(), nil)
+		h.loginByEmail.Allow(limitKey)
+		if e, ok := apperr.As(err); ok {
+			SendError(c, http.StatusUnauthorized, "AUTH_FAILED", e.Msg, nil)
+			return
+		}
+		fail(c, "AUTH_FAILED", err)
 		return
 	}
 
+	h.loginByEmail.Reset(limitKey)
 	SendSuccess(c, http.StatusOK, result, "Login successful")
 }
 
 func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 	var req GoogleLoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		SendError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error(), nil)
+		SendError(c, http.StatusBadRequest, "INVALID_INPUT", "Invalid request body", nil)
 		return
 	}
 
@@ -90,7 +111,7 @@ func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 
 	result, err := h.authService.LoginWithGoogle(req.Email, req.Name, avatarURL, idToken)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "AUTH_FAILED", err.Error(), nil)
+		fail(c, "AUTH_FAILED", err)
 		return
 	}
 
@@ -118,4 +139,47 @@ func (h *AuthHandler) Me(c *gin.Context) {
 		AvatarURL: user.AvatarURL,
 		Provider:  user.Provider,
 	}, "")
+}
+
+func (h *AuthHandler) Refresh(c *gin.Context) {
+	userID, ok := middleware.GetCurrentUserID(c)
+	if !ok {
+		SendError(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not authenticated", nil)
+		return
+	}
+	result, err := h.authService.Refresh(userID)
+	if err != nil {
+		SendError(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not found", nil)
+		return
+	}
+	SendSuccess(c, http.StatusOK, result, "Token refreshed")
+}
+
+// LogoutAll revokes every token of the caller (this device included).
+func (h *AuthHandler) LogoutAll(c *gin.Context) {
+	userID, ok := middleware.GetCurrentUserID(c)
+	if !ok {
+		SendError(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not authenticated", nil)
+		return
+	}
+	if err := h.authService.RevokeAllTokens(userID); err != nil {
+		fail(c, "LOGOUT_FAILED", err)
+		return
+	}
+	SendSuccess(c, http.StatusOK, nil, "All sessions signed out")
+}
+
+func (h *AuthHandler) DeleteMe(c *gin.Context) {
+	userID, ok := middleware.GetCurrentUserID(c)
+	if !ok {
+		SendError(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not authenticated", nil)
+		return
+	}
+
+	if err := h.authService.DeleteAccount(userID); err != nil {
+		fail(c, "DELETE_FAILED", err)
+		return
+	}
+
+	SendSuccess(c, http.StatusOK, nil, "Account deleted")
 }

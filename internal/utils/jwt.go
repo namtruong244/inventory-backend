@@ -12,14 +12,17 @@ type JWTClaims struct {
 	UserID uuid.UUID `json:"userId"`
 	Email  string    `json:"email"`
 	Role   string    `json:"role"`
+	// TokenVersion must equal users.token_version or the token is revoked.
+	TokenVersion int `json:"tv"`
 	jwt.RegisteredClaims
 }
 
-func GenerateToken(userID uuid.UUID, email, role, secret string, expirationHours int) (string, error) {
+func GenerateToken(userID uuid.UUID, email, role string, tokenVersion int, secret string, expirationHours int) (string, error) {
 	claims := JWTClaims{
-		UserID: userID,
-		Email:  email,
-		Role:   role,
+		UserID:       userID,
+		Email:        email,
+		Role:         role,
+		TokenVersion: tokenVersion,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(expirationHours) * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

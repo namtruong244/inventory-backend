@@ -3,6 +3,7 @@ package service
 import (
 	"inventory_backend/internal/apperr"
 	"strings"
+	"time"
 
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
@@ -31,19 +32,27 @@ type CreateBoxRequest struct {
 }
 
 type UpdateBoxRequest struct {
-	Name        *string `json:"name"`
-	Type        *string `json:"type"`
-	Description *string `json:"description"`
-	Label       *string `json:"label"`
-	Icon        *string `json:"icon"`
+	// UpdatedAt is the version the client last saw; when set and stale the update is rejected with 409.
+	UpdatedAt   *time.Time `json:"updatedAt"`
+	Name        *string    `json:"name"`
+	Type        *string    `json:"type"`
+	Description *string    `json:"description"`
+	Label       *string    `json:"label"`
+	Icon        *string    `json:"icon"`
 }
 
 type BoxDetailResponse struct {
 	Box         *models.Box             `json:"box"`
 	Breadcrumbs []models.BreadcrumbItem `json:"breadcrumbs"`
 	SubBoxes    []models.Box            `json:"subBoxes"`
-	Items       []models.Item           `json:"items"`
+	// Items holds at most boxDetailItemLimit items; ItemCount is the real total.
+	// When ItemsTruncated is true, page through GET /items?boxId=<id> for the rest.
+	Items          []models.Item `json:"items"`
+	ItemCount      int64         `json:"itemCount"`
+	ItemsTruncated bool          `json:"itemsTruncated"`
 }
+
+const boxDetailItemLimit = 200
 
 type boxService struct {
 	boxRepo  repository.BoxRepository
@@ -128,12 +137,12 @@ func (s *boxService) GetByID(userID uuid.UUID, id uuid.UUID) (*BoxDetailResponse
 		return nil, err
 	}
 
-	items, _, err := s.itemRepo.List(userID, repository.ItemFilter{
+	items, total, err := s.itemRepo.List(userID, repository.ItemFilter{
 		BoxID: &id,
-		Limit: 1000,
+		Limit: boxDetailItemLimit,
 	})
 	if err != nil {
-		items = []models.Item{}
+		return nil, err
 	}
 
 	return &BoxDetailResponse{
@@ -141,6 +150,9 @@ func (s *boxService) GetByID(userID uuid.UUID, id uuid.UUID) (*BoxDetailResponse
 		Breadcrumbs: breadcrumbs,
 		SubBoxes:    subBoxes,
 		Items:       items,
+
+		ItemCount:      total,
+		ItemsTruncated: total > int64(len(items)),
 	}, nil
 }
 
@@ -216,6 +228,9 @@ func (s *boxService) Update(userID uuid.UUID, id uuid.UUID, req UpdateBoxRequest
 	if err != nil {
 		return nil, apperr.NotFound("box not found")
 	}
+	if isStale(req.UpdatedAt, box.UpdatedAt) {
+		return nil, apperr.Conflict("box was modified since you last loaded it, please reload and try again")
+	}
 
 	if req.Name != nil {
 		box.Name = *req.Name
@@ -278,8 +293,8 @@ func (s *boxService) Move(userID uuid.UUID, id uuid.UUID, newParentID *uuid.UUID
 		}
 	}
 
-	box.ParentID = newParentID
-	return s.boxRepo.Update(box)
+	// Re-checked under a per-user lock so concurrent moves cannot form a cycle.
+	return s.boxRepo.Move(box.ID, userID, newParentID)
 }
 
 func (s *boxService) Delete(userID uuid.UUID, id uuid.UUID, cascade bool) error {

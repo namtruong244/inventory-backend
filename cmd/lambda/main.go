@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	adapterV1 *ginadapter.GinLambda
-	adapterV2 *ginadapter.GinLambdaV2
+	adapterV1  *ginadapter.GinLambda
+	adapterV2  *ginadapter.GinLambdaV2
+	purgeTrash func() (int64, error)
 )
 
 func init() {
@@ -37,6 +38,11 @@ func init() {
 		log.Fatalf("Fatal: Router initialization failed on Lambda cold start: %v", err)
 	}
 
+	purgeTrash, err = app.NewTrashPurger(cfg, db)
+	if err != nil {
+		log.Fatalf("Fatal: Trash purger initialization failed: %v", err)
+	}
+
 	// 4. Create adapters for both API Gateway HTTP API (v2) and REST API (v1)
 	adapterV1 = ginadapter.New(router)
 	adapterV2 = ginadapter.NewV2(router)
@@ -46,12 +52,20 @@ func init() {
 
 type eventVersion struct {
 	Version string `json:"version"`
+	Source  string `json:"source"`
 }
 
 // UniversalHandler automatically handles API Gateway HTTP API (v2), Function URLs, and REST API (v1).
 func UniversalHandler(ctx context.Context, raw json.RawMessage) (interface{}, error) {
 	var detector eventVersion
-	if err := json.Unmarshal(raw, &detector); err == nil && detector.Version == "2.0" {
+	_ = json.Unmarshal(raw, &detector)
+	// EventBridge schedule (rate/cron rule): purge expired trash instead of serving HTTP.
+	if detector.Source == "aws.events" {
+		n, err := purgeTrash()
+		log.Printf("scheduled trash purge: removed %d rows, err=%v", n, err)
+		return map[string]int64{"removed": n}, err
+	}
+	if detector.Version == "2.0" {
 		var req events.APIGatewayV2HTTPRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, err

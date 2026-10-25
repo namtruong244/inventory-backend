@@ -28,8 +28,10 @@ type MoveItemRequest struct {
 	TargetBoxID uuid.UUID `json:"targetBoxId" binding:"required"`
 }
 
+// UpdateQuantityRequest carries exactly one of Quantity (absolute) or Delta (relative, atomic).
 type UpdateQuantityRequest struct {
-	Quantity *float64 `json:"quantity" binding:"required,gte=0"`
+	Quantity *float64 `json:"quantity" binding:"omitempty,gte=0"`
+	Delta    *float64 `json:"delta"`
 	// Reason: restock, consume, damaged, lost, correction or adjust (default).
 	Reason string `json:"reason"`
 	Note   string `json:"note"`
@@ -218,6 +220,21 @@ func (h *ItemHandler) UpdateQuantity(c *gin.Context) {
 	var req UpdateQuantityRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		SendError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error(), nil)
+		return
+	}
+
+	if (req.Quantity == nil) == (req.Delta == nil) {
+		SendError(c, http.StatusBadRequest, "INVALID_INPUT", "provide exactly one of quantity or delta", nil)
+		return
+	}
+
+	if req.Delta != nil {
+		qty, err := h.itemService.AdjustQuantity(userID, id, *req.Delta, req.Reason, req.Note)
+		if err != nil {
+			fail(c, "UPDATE_QUANTITY_FAILED", err)
+			return
+		}
+		SendSuccess(c, http.StatusOK, gin.H{"id": id, "quantity": qty}, "Quantity updated successfully")
 		return
 	}
 

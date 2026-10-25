@@ -12,7 +12,7 @@ Hệ thống quản lý kho & tài sản cá nhân / doanh nghiệp nhỏ bao g�
 3. **Quản lý phân cấp không gian lưu trữ (Multi-level Storage Hierarchy / Boxes):** Cấu trúc cây đa cấp linh hoạt (Room → Cabinet → Shelf → Box → Drawer). Hỗ trợ điều chuyển vị trí cha (move box) với cơ chế kiểm tra chống lặp vòng (Cycle Prevention).
 4. **Quản lý danh mục & Thuộc tính động (Item Catalog, Specifications & Custom Attributes):** Theo dõi số lượng, đơn vị, giá trị, hình ảnh, hóa đơn, hạn sử dụng (perishables), bảo hành (warranties), kèm bảng thông số kỹ thuật động (Color, RAM, Storage, Dimension...) dạng key-value.
 5. **Cập nhật kho nhanh (Quick Quantity Update & Transfer):** Tăng/giảm số lượng tồn kho nhanh chóng và điều chuyển tài sản giữa các kho/thùng chứa.
-6. **Cảnh báo ngưỡng tồn kho riêng từng món (Item-specific Low Stock Threshold):** Mỗi mặt hàng được thiết lập ngưỡng cảnh báo thiếu hụt riêng (`min_quantity`). Tự động phát hiện khi `quantity <= min_quantity`.
+6. **Cảnh báo ngưỡng tồn kho riêng từng món (Item-specific Low Stock Threshold):** Mỗi mặt hàng được thiết lập ngưỡng cảnh báo thiếu hụt riêng (`min_quantity`). Tự động phát hiện khi `quantity + lentQuantity <= min_quantity`.
 7. **Theo dõi mượn / trả (Lending & Borrowing Tracker):** Quản lý trạng thái mượn đồ, thông tin người mượn, hạn trả, cảnh báo quá hạn.
 8. **Mã vạch & QR Code (Barcode / QR Scanner):** Định danh vị trí lưu trữ (Box label) và tra cứu thông minh đồ đạc qua mã vạch sản phẩm (UPC/EAN/Code128) hoặc serial number.
 9. **Trung tâm cảnh báo (Alerts & Health Dashboard):** Tổng hợp quá hạn mượn, hết hạn sử dụng, sắp hết hạn, sắp hết bảo hành, chạm ngưỡng tồn kho thấp.
@@ -157,7 +157,7 @@ Cấu trúc Self-Referencing cây phân cấp đa tầng.
 | `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
 
 > **Nguyên tắc Low Stock:**  
-> Một Item được xác định là Low Stock khi: `min_quantity IS NOT NULL AND quantity <= min_quantity`.
+> Một Item được xác định là Low Stock khi: `min_quantity IS NOT NULL AND quantity + lentQuantity <= min_quantity` (`lentQuantity`: đơn vị đang cho mượn một phần).
 
 #### 3.1.6. Bảng `lending_records` (Lịch sử mượn & trả đồ)
 
@@ -291,8 +291,9 @@ CREATE INDEX IF NOT EXISTS idx_lending_active ON lending_records(user_id, actual
 ### 4.1. Authentication (Xác thực tài khoản & Mạng xã hội)
 
 #### `POST /api/v1/auth/register`
-Đăng ký tài khoản người dùng bằng Email/Password.
+Đăng ký tài khoản người dùng bằng Email/Password. Mật khẩu tối thiểu **8 ký tự**. Email được chuẩn hoá `lower(trim())` khi đăng ký/đăng nhập/Google (unique index `uq_users_email_lower`; migration chỉ log cảnh báo nếu DB cũ còn email trùng khác hoa/thường). Email đã tồn tại và race unique đều trả cùng một 400 `REGISTRATION_FAILED` với thông báo chung (không lộ email nào đã đăng ký). Lỗi nội bộ/JWT không còn trả `err.Error()` ra client (token sai → `TOKEN_EXPIRED_OR_INVALID` "Token is invalid or has expired").
 - **Yêu cầu xác thực:** Không (Public).
+- **Rate limit:** `/auth/*` public giới hạn 30 request / 15 phút / IP; `/auth/login` thêm 10 lần / 15 phút / email. Vượt ngưỡng → 429 `RATE_LIMITED`. Bộ đếm in-memory theo instance — trên Lambda cần thêm API Gateway throttling hoặc WAF rate-based rule để giới hạn toàn cục.
 - **Request Body:**
   ```json
   {
@@ -360,7 +361,7 @@ CREATE INDEX IF NOT EXISTS idx_lending_active ON lending_records(user_id, actual
 - **Nghiệp vụ xử lý Backend:**
   0. Bắt buộc có `id_token`; verify với Google (`aud`/`azp` khớp `GOOGLE_CLIENT_ID`, `email_verified = true`). Email lấy từ token, không dùng email trong body. Thiếu/không hợp lệ → 400 `AUTH_FAILED`.
   1. Kiểm tra trong bảng `users` theo `email`.
-  2. Nếu người dùng đã tồn tại: Cập nhật `name`, `avatar_url` (nếu có), lưu `provider = 'google'`.
+  2. Nếu người dùng đã tồn tại: Cập nhật `name`, `avatar_url` (nếu có), lưu `provider = 'google'` và **xoá `password_hash`** (đăng ký local không xác minh email, nên mật khẩu có thể do kẻ khác đặt trước — chống pre-account takeover).
   3. Nếu chưa tồn tại: Tạo mới người dùng với `role = 'Owner'`, `provider = 'google'`, `password_hash = NULL`.
   4. Khởi tạo cấu hình mặc định trong `user_settings` và danh mục mặc định trong `categories` (nếu là tài khoản mới).
   5. Ký và trả về JWT Bearer Token.
@@ -398,6 +399,22 @@ Lấy thông tin người dùng hiện tại từ JWT Bearer Token.
     }
   }
   ```
+
+#### `DELETE /api/v1/auth/me`
+Xoá vĩnh viễn tài khoản hiện tại cùng toàn bộ dữ liệu (box, item kể cả trong thùng rác, phiếu mượn, lịch sử tồn kho, danh mục, cấu hình) trong một transaction, sau đó xoá file ảnh đã upload (best-effort).
+- **Yêu cầu xác thực:** Bearer Token.
+- **Response 200 OK:** `{ "success": true, "data": null, "message": "Account deleted" }`
+- Token cũ trở nên vô hiệu (mọi request → 401).
+
+#### `POST /api/v1/auth/refresh`
+Cấp token mới cho user đang đăng nhập (cùng `token_version`). Response `data`: `{ "token": "...", "user": {...} }` như login.
+- **Yêu cầu xác thực:** Bearer Token.
+
+#### `POST /api/v1/auth/logout-all`
+Thu hồi mọi token đã cấp cho tài khoản (tăng `users.token_version`). Token cũ → 401 `TOKEN_REVOKED`. Đăng nhập Google vào tài khoản local cũng tăng `token_version`.
+- **Yêu cầu xác thực:** Bearer Token.
+
+> JWT có claim `tv` (token version). Middleware so với `users.token_version`: lệch → 401 `TOKEN_REVOKED`; user đã xoá → 401. FE gặp 401 phải xoá phiên, chuyển về đăng nhập và **giữ nguyên hàng đợi offline**.
 
 ---
 
@@ -583,10 +600,14 @@ Lấy chi tiết thùng chứa kèm Breadcrumb Trail và danh sách vật phẩm
           "isLowStock": true,
           "status": "stored"
         }
-      ]
+      ],
+      "itemCount": 1,
+      "itemsTruncated": false
     }
   }
   ```
+
+> `items` tối đa 200 phần tử; `itemCount` là tổng thật và `itemsTruncated=true` khi còn nữa → phân trang qua `GET /items?boxId=<id>&page=N`.
 
 #### `PUT /api/v1/boxes/:id`
 Chỉnh sửa tên, phân loại (`room`, `cabinet`, `shelf`, `box`, `drawer`), mô tả của thùng chứa.
@@ -618,7 +639,7 @@ Tìm kiếm và lọc danh sách tài sản trong kho.
   - `boxId`: Lọc theo vị trí lưu trữ.
   - `category`: Lọc theo danh mục.
   - `status`: Lọc theo trạng thái (`stored`, `inUse`, `lent`, `broken`, `disposed`).
-  - `isLowStock`: `true` để lọc ra danh sách sắp hết hàng (`quantity <= min_quantity`).
+  - `isLowStock`: `true` để lọc ra danh sách sắp hết hàng (`quantity + lentQuantity <= min_quantity`).
   - `isExpired`: `true` để lấy các món đã hết hạn sử dụng.
   - `isExpiring`: `true` để lấy các món sắp hết hạn trong N ngày.
   - `page`: Số trang (mặc định 1).
@@ -697,6 +718,9 @@ Lấy chi tiết toàn bộ thông số của vật phẩm, breadcrumb vị trí
 
 #### `PUT /api/v1/items/:id`
 Cập nhật toàn bộ thông tin vật phẩm (hỗ trợ chỉnh sửa số lượng, ngưỡng `minQuantity`, giá, ảnh, thông số `customAttributes`).
+- `updatedAt` (tuỳ chọn): phiên bản mà bản sửa dựa trên. Nếu khác `items.updated_at` hiện tại (so ở mức mili giây) → 409 `CONFLICT`, không ghi gì. FE gửi khi phát lại thay đổi offline; không gửi = ghi đè như cũ. `PUT /boxes/:id` có cùng quy tắc.
+- Đổi `boxId` ghi một dòng `stock_movements` kiểu move, note `"to <tên box>"` (giống `PATCH /items/:id/move`).
+- Response item có thêm `lentQuantity` (tổng số lượng đang cho mượn từng phần) và `GET /items/:id` có `activeLoans` (mọi khoản mượn đang mở, kể cả từng phần). Low stock tính theo `quantity + lentQuantity <= minQuantity`.
 
 #### `PATCH /api/v1/items/:id/quantity`
 Cập nhật nhanh số lượng tồn kho (tăng/giảm trực tiếp khi xuất/nhập kho).
@@ -708,6 +732,7 @@ Cập nhật nhanh số lượng tồn kho (tăng/giảm trực tiếp khi xuấ
     "note": "optional"
   }
   ```
+  Hoặc gửi `delta` (số có dấu, cộng vào số lượng hiện tại trong transaction có khoá hàng) thay cho `quantity`; phải có **đúng một** trong hai, nếu không 400 `INVALID_INPUT`. Kết quả âm → 400. Với `delta`, `data` là `{ "id", "quantity" }`. FE xếp hàng thay đổi offline dưới dạng `delta` để nhiều thiết bị cộng dồn được.
   `reason` (tuỳ chọn, mặc định `adjust`): `restock | consume | damaged | lost | correction | adjust`; giá trị khác trả 400. Mỗi lần số lượng đổi ghi một dòng `stock_movements`.
 - **Response 200 OK:**
   ```json
@@ -753,7 +778,7 @@ Chuyển vật phẩm sang thùng/vị trí lưu trữ mới.
   ```
 
 #### `DELETE /api/v1/items/:id`
-Xóa vĩnh viễn vật phẩm khỏi hệ thống.
+Xóa vĩnh viễn vật phẩm khỏi hệ thống. Bị chặn (409) nếu item còn khoản mượn đang mở; xoá vĩnh viễn từ thùng rác cũng vậy.
 
 ---
 
@@ -765,6 +790,7 @@ Xuất mượn một vật phẩm.
   1. Kiểm tra vật phẩm có đang ở trạng thái `stored` hoặc `inUse` không (chặn nếu đang `lent`, `broken`, `disposed`).
   2. Tạo bản ghi mới trong bảng `lending_records`.
   3. Cập nhật `item.status = 'lent'`.
+  4. Nếu `id` gửi kèm đã tồn tại (khoản mượn khác, hoặc của user khác) → 409 `CONFLICT`.
 - **Request Body:**
   ```json
   {
@@ -811,7 +837,7 @@ Xuất mượn một vật phẩm.
 Lấy danh sách các tài sản đang cho mượn (`actual_return_date IS NULL`).
 
 #### `GET /api/v1/lending/overdue`
-Lấy danh sách các tài sản mượn đã quá hạn trả (`actual_return_date IS NULL AND expected_return_date < NOW()`).
+Lấy danh sách các tài sản mượn đã quá hạn trả (`actual_return_date IS NULL` và **ngày** hẹn trả < hôm nay theo múi giờ user; khoản hẹn trả hôm nay chưa quá hạn).
 
 #### `GET /api/v1/lending/history?itemId=...`
 Lấy toàn bộ lịch sử các lần mượn trả của một món đồ.
@@ -894,7 +920,9 @@ Lấy chi tiết danh sách tất cả các nhóm vật phẩm cần lưu ý:
 2. `expiringSoonItems`: Mặt hàng sắp hết hạn (trong vòng `expiryWarningDays` ngày).
 3. `expiringWarranties`: Hết hạn bảo hành sắp tới (trong vòng 30 ngày).
 4. `overdueLoans`: Khoản mượn quá hạn hẹn trả.
-5. `lowStockItems`: Mặt hàng chạm hoặc dưới ngưỡng `min_quantity` riêng biệt.
+5. `lowStockItems`: Mặt hàng chạm hoặc dưới ngưỡng `min_quantity` riêng biệt (cộng cả số lượng đang cho mượn từng phần).
+
+Lọc trạng thái: hết hạn/sắp hết hạn bỏ qua item `disposed|lost|broken`; bảo hành bỏ qua `disposed|lost`.
 
 ---
 
@@ -956,6 +984,7 @@ Tải lên ảnh chụp thực tế đồ đạc hoặc ảnh hóa đơn mua hà
    - Nếu `min_quantity IS NOT NULL`: Khi `quantity <= min_quantity`, hệ thống tự động gắn nhãn `isLowStock = true` và đưa vào danh sách cảnh báo thiếu hụt.
 
 2. **Chống lặp vòng cây vị trí (Cycle Prevention):**
+   - Việc move chạy trong transaction có `pg_advisory_xact_lock` theo user nên hai lần move đồng thời không tạo được vòng; độ sâu tối đa 64.
    - Khi cập nhật `parent_id` của một `Box`, hệ thống phải kiểm tra đảm bảo `parent_id` mới không được trùng với chính nó và không phải là con cháu cấp dưới của nó.
    - Hỗ trợ gán `newParentId = null` để đưa vị trí về cấp cao nhất (Root).
 
@@ -1123,6 +1152,7 @@ type ScanLookupResponse struct {
 - Index `uq_boxes_user_label_live` chỉ ràng buộc label với box còn sống.
 - Endpoints (cần auth): `GET /trash`, `POST /trash/items/:id/restore`, `POST /trash/boxes/:id/restore`, `DELETE /trash/items/:id`, `DELETE /trash/boxes/:id`, `DELETE /trash?olderThanDays=N` (dọn thùng rác).
 - Không xóa được item đang có khoản mượn mở.
+- **Tự dọn:** Lambda nhận sự kiện EventBridge Scheduler/rule (`source: "aws.events"`, ví dụ `rate(1 day)`) và xóa vĩnh viễn mọi thứ đã nằm trong thùng rác quá 30 ngày (`app.TrashRetentionDays`) của tất cả user, kèm file ảnh/hóa đơn của item bị xóa. Item đang có khoản mượn mở vẫn được giữ lại. Cần tự tạo rule trên AWS trỏ vào function; server HTTP (`cmd/api`) không có job này.
 
 ## Mượn một phần — BIZ-1
 

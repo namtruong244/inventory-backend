@@ -23,17 +23,18 @@ var (
 type LendingRepository interface {
 	Create(record *models.LendingRecord) error
 	GetByID(id uuid.UUID, userID uuid.UUID) (*models.LendingRecord, error)
-	GetActiveLoanByItemID(itemID uuid.UUID) (*models.LendingRecord, error)
+	GetActiveLoanByItemID(userID, itemID uuid.UUID) (*models.LendingRecord, error)
 	Update(record *models.LendingRecord) error
 	// LendItem atomically checks the item (row-locked), creates the record and marks the item lent.
 	LendItem(userID uuid.UUID, record *models.LendingRecord) (*models.Item, error)
 	// ReturnLoan atomically closes the record (row-locked) and sets the item back to stored.
 	ReturnLoan(userID uuid.UUID, recordID uuid.UUID) error
 	ListActive(userID uuid.UUID) ([]models.LendingRecord, error)
-	ListOverdue(userID uuid.UUID) ([]models.LendingRecord, error)
+	// ListOverdue returns open loans whose expected return day is before today (YYYY-MM-DD, the user's local date).
+	ListOverdue(userID uuid.UUID, today string) ([]models.LendingRecord, error)
 	ListHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([]models.LendingRecord, error)
 	CountActive(userID uuid.UUID) (int64, error)
-	CountOverdue(userID uuid.UUID) (int64, error)
+	CountOverdue(userID uuid.UUID, today string) (int64, error)
 }
 
 type lendingRepo struct {
@@ -57,7 +58,7 @@ func (r *lendingRepo) GetByID(id uuid.UUID, userID uuid.UUID) (*models.LendingRe
 	return &record, nil
 }
 
-func (r *lendingRepo) GetActiveLoanByItemID(itemID uuid.UUID) (*models.LendingRecord, error) {
+func (r *lendingRepo) GetActiveLoanByItemID(userID, itemID uuid.UUID) (*models.LendingRecord, error) {
 	var record models.LendingRecord
 	err := r.db.Where("item_id = ? AND actual_return_date IS NULL", itemID).Order("lent_date DESC").First(&record).Error
 	if err != nil {
@@ -182,20 +183,26 @@ func (r *lendingRepo) ListActive(userID uuid.UUID) ([]models.LendingRecord, erro
 	if err != nil {
 		return nil, err
 	}
-	r.populateItemInfo(records)
+	if err := r.populateItemInfo(userID, records); err != nil {
+		return nil, err
+	}
 	return records, nil
 }
 
-func (r *lendingRepo) ListOverdue(userID uuid.UUID) ([]models.LendingRecord, error) {
+// overdueCond compares calendar days: a loan due today is not overdue until tomorrow.
+const overdueCond = "user_id = ? AND actual_return_date IS NULL AND expected_return_date IS NOT NULL AND (expected_return_date AT TIME ZONE 'UTC')::date < ?::date"
+
+func (r *lendingRepo) ListOverdue(userID uuid.UUID, today string) ([]models.LendingRecord, error) {
 	var records []models.LendingRecord
-	now := time.Now().UTC()
-	err := r.db.Where("user_id = ? AND actual_return_date IS NULL AND expected_return_date IS NOT NULL AND expected_return_date < ?", userID, now).
+	err := r.db.Where(overdueCond, userID, today).
 		Order("expected_return_date ASC").
 		Find(&records).Error
 	if err != nil {
 		return nil, err
 	}
-	r.populateItemInfo(records)
+	if err := r.populateItemInfo(userID, records); err != nil {
+		return nil, err
+	}
 	return records, nil
 }
 
@@ -207,7 +214,9 @@ func (r *lendingRepo) ListHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([
 	if err != nil {
 		return nil, err
 	}
-	r.populateItemInfo(records)
+	if err := r.populateItemInfo(userID, records); err != nil {
+		return nil, err
+	}
 	return records, nil
 }
 
@@ -219,25 +228,26 @@ func (r *lendingRepo) CountActive(userID uuid.UUID) (int64, error) {
 	return count, err
 }
 
-func (r *lendingRepo) CountOverdue(userID uuid.UUID) (int64, error) {
+func (r *lendingRepo) CountOverdue(userID uuid.UUID, today string) (int64, error) {
 	var count int64
-	now := time.Now().UTC()
 	err := r.db.Model(&models.LendingRecord{}).
-		Where("user_id = ? AND actual_return_date IS NULL AND expected_return_date IS NOT NULL AND expected_return_date < ?", userID, now).
+		Where(overdueCond, userID, today).
 		Count(&count).Error
 	return count, err
 }
 
-func (r *lendingRepo) populateItemInfo(records []models.LendingRecord) {
+func (r *lendingRepo) populateItemInfo(userID uuid.UUID, records []models.LendingRecord) error {
 	if len(records) == 0 {
-		return
+		return nil
 	}
 	var itemIDs []uuid.UUID
 	for _, rec := range records {
 		itemIDs = append(itemIDs, rec.ItemID)
 	}
 	var items []models.Item
-	r.db.Unscoped().Where("id IN ?", itemIDs).Select("id, name, barcode").Find(&items)
+	if err := r.db.Unscoped().Where("user_id = ? AND id IN ?", userID, itemIDs).Select("id, name, barcode").Find(&items).Error; err != nil {
+		return err
+	}
 	itemMap := make(map[uuid.UUID]models.Item)
 	for _, it := range items {
 		itemMap[it.ID] = it
@@ -250,4 +260,5 @@ func (r *lendingRepo) populateItemInfo(records []models.LendingRecord) {
 			}
 		}
 	}
+	return nil
 }

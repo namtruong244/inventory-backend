@@ -68,6 +68,8 @@ internal/utils/        JWT, bcrypt password
 - Google login (không còn Apple): **bắt buộc** `id_token`, verify với Google (timeout 5s, kiểm tra `aud`/`azp` = `GOOGLE_CLIENT_ID` và `email_verified`); email lấy từ token, không tin email trong body. Token `mock_*` chỉ được chấp nhận khi `APP_ENV=test`. User mới → tạo `user_settings` + danh mục mặc định; user đã tồn tại → link provider, giữ tên cũ.
 - `APP_ENV=production` bắt buộc `JWT_SECRET` riêng, ≥ 32 ký tự (`config.Validate()` sẽ `log.Fatalf` nếu để mặc định). `CORS_ALLOWED_ORIGINS` (CSV): trống = cho phép mọi origin ở dev, tắt CORS ở production; không bao giờ bật credentials.
 - `password_hash` nullable (user social login).
+- Email luôn chuẩn hoá `lower(trim())` (`service.NormalizeEmail`), unique index `uq_users_email_lower`; đăng ký trùng trả thông báo chung (không lộ email đã tồn tại). Không trả `err.Error()` của DB/JWT ra client.
+- Dọn thùng rác định kỳ: Lambda nhận sự kiện EventBridge (`source: aws.events`) → `TrashService.PurgeExpired(30)` (xem `cmd/lambda/main.go`).
 
 ## Test
 

@@ -20,6 +20,9 @@ import (
 // StorageProvider defines the contract for uploading media assets.
 type StorageProvider interface {
 	Upload(ctx context.Context, file io.Reader, filename string, contentType string, folder string) (string, error)
+	// Delete removes a file previously returned by Upload. URLs that do not
+	// belong to this provider are ignored (nil error).
+	Delete(ctx context.Context, fileURL string) error
 }
 
 // LocalStorageProvider saves files to the local filesystem.
@@ -54,6 +57,18 @@ func (l *LocalStorageProvider) Upload(ctx context.Context, file io.Reader, filen
 
 	url := fmt.Sprintf("%s/uploads/%s/%s", strings.TrimRight(l.baseURL, "/"), folder, filename)
 	return url, nil
+}
+
+func (l *LocalStorageProvider) Delete(ctx context.Context, fileURL string) error {
+	prefix := strings.TrimRight(l.baseURL, "/") + "/uploads/"
+	if !strings.HasPrefix(fileURL, prefix) {
+		return nil
+	}
+	rel := filepath.Clean("/" + strings.TrimPrefix(fileURL, prefix))
+	if err := os.Remove(filepath.Join(l.uploadDir, rel)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete local file: %w", err)
+	}
+	return nil
 }
 
 // R2StorageProvider uploads files to Cloudflare R2 (S3-compatible).
@@ -116,6 +131,21 @@ func (r *R2StorageProvider) Upload(ctx context.Context, file io.Reader, filename
 	// Build public URL
 	publicURL := strings.TrimRight(r.publicURL, "/")
 	return fmt.Sprintf("%s/%s", publicURL, objectKey), nil
+}
+
+func (r *R2StorageProvider) Delete(ctx context.Context, fileURL string) error {
+	prefix := strings.TrimRight(r.publicURL, "/") + "/"
+	if !strings.HasPrefix(fileURL, prefix) {
+		return nil
+	}
+	_, err := r.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(r.bucket),
+		Key:    aws.String(strings.TrimPrefix(fileURL, prefix)),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete object from Cloudflare R2: %w", err)
+	}
+	return nil
 }
 
 // NewStorageProvider creates either a local or Cloudflare R2 storage provider based on configuration.

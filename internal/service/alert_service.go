@@ -51,6 +51,13 @@ func NewAlertService(db *gorm.DB, settingsRepo repository.SettingsRepository, le
 	}
 }
 
+// Items that are gone (disposed/lost) never raise alerts; broken ones still
+// carry a warranty but need neither restocking nor an expiry reminder.
+const (
+	warrantyLive = "status NOT IN ('disposed', 'lost')"
+	expiryLive   = "status NOT IN ('disposed', 'lost', 'broken')"
+)
+
 // alertWindow holds the date boundaries (YYYY-MM-DD, in the user's timezone) used by every alert query.
 type alertWindow struct {
 	today, expirySoon, warrantySoon string
@@ -85,10 +92,10 @@ func (s *alertService) GetSummary(userID uuid.UUID) (*AlertSummaryResponse, erro
 	}
 	// One pass over the user's items instead of one COUNT query per alert type
 	err := s.db.Model(&models.Item{}).
-		Select(`COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < @today) AS expired,
-			COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= @today AND expiry_date <= @soon) AS expiring_soon,
-			COUNT(*) FILTER (WHERE warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= @today AND warranty_expiry_date <= @warranty) AS warranty,
-			COUNT(*) FILTER (WHERE min_quantity IS NOT NULL AND quantity <= min_quantity) AS low_stock`,
+		Select(`COUNT(*) FILTER (WHERE `+expiryLive+` AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < @today) AS expired,
+			COUNT(*) FILTER (WHERE `+expiryLive+` AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= @today AND expiry_date <= @soon) AS expiring_soon,
+			COUNT(*) FILTER (WHERE `+warrantyLive+` AND warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= @today AND warranty_expiry_date <= @warranty) AS warranty,
+			COUNT(*) FILTER (WHERE `+expiryLive+` AND `+repository.LowStockCond+`) AS low_stock`,
 			sql.Named("today", w.today), sql.Named("soon", w.expirySoon), sql.Named("warranty", w.warrantySoon)).
 		Where("user_id = ?", userID).
 		Scan(&counts).Error
@@ -96,7 +103,7 @@ func (s *alertService) GetSummary(userID uuid.UUID) (*AlertSummaryResponse, erro
 		return nil, err
 	}
 
-	overdueLoansCount, err := s.lendingRepo.CountOverdue(userID)
+	overdueLoansCount, err := s.lendingRepo.CountOverdue(userID, w.today)
 	if err != nil {
 		return nil, err
 	}
@@ -122,30 +129,35 @@ func (s *alertService) GetAll(userID uuid.UUID) (*AlertAllResponse, error) {
 	w := s.window(userID)
 
 	expiredItems := []models.Item{}
-	if err := s.db.Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < ?", userID, w.today).
+	if err := s.db.Where("user_id = ? AND "+expiryLive+" AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < ?", userID, w.today).
 		Order("expiry_date ASC").Find(&expiredItems).Error; err != nil {
 		return nil, err
 	}
 
 	expiringSoonItems := []models.Item{}
-	if err := s.db.Where("user_id = ? AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= ? AND expiry_date <= ?", userID, w.today, w.expirySoon).
+	if err := s.db.Where("user_id = ? AND "+expiryLive+" AND expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= ? AND expiry_date <= ?", userID, w.today, w.expirySoon).
 		Order("expiry_date ASC").Find(&expiringSoonItems).Error; err != nil {
 		return nil, err
 	}
 
 	warrantyEndingItems := []models.Item{}
-	if err := s.db.Where("user_id = ? AND warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= ? AND warranty_expiry_date <= ?", userID, w.today, w.warrantySoon).
+	if err := s.db.Where("user_id = ? AND "+warrantyLive+" AND warranty_expiry_date IS NOT NULL AND warranty_expiry_date != '' AND warranty_expiry_date >= ? AND warranty_expiry_date <= ?", userID, w.today, w.warrantySoon).
 		Order("warranty_expiry_date ASC").Find(&warrantyEndingItems).Error; err != nil {
 		return nil, err
 	}
 
 	lowStockItems := []models.Item{}
-	if err := s.db.Where("user_id = ? AND min_quantity IS NOT NULL AND quantity <= min_quantity", userID).
+	if err := s.db.Where("user_id = ? AND "+expiryLive+" AND "+repository.LowStockCond, userID).
 		Order("quantity ASC").Find(&lowStockItems).Error; err != nil {
 		return nil, err
 	}
+	ptrs := make([]*models.Item, len(lowStockItems))
+	for i := range lowStockItems {
+		ptrs[i] = &lowStockItems[i]
+	}
+	repository.FillLent(s.db, ptrs)
 
-	overdueLoans, err := s.lendingRepo.ListOverdue(userID)
+	overdueLoans, err := s.lendingRepo.ListOverdue(userID, w.today)
 	if err != nil {
 		return nil, err
 	}

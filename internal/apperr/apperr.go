@@ -50,6 +50,12 @@ func NotFoundOr(err error, msg string) error {
 	return err
 }
 
+// IsUnique reports whether err is a PostgreSQL unique-violation.
+func IsUnique(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
 // ConflictOnUnique turns a PostgreSQL unique-violation into a Conflict error
 // with msg; other errors pass through.
 func ConflictOnUnique(err error, msg string) error {

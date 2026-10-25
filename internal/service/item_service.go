@@ -37,6 +37,12 @@ func normalizeDate(field string, v *string) (*string, error) {
 	return nil, apperr.Invalid(field + " must be a date in YYYY-MM-DD format")
 }
 
+// isStale reports whether the client's version differs from the stored one.
+// Compared at millisecond precision so JSON round-trips through any client survive.
+func isStale(seen *time.Time, current time.Time) bool {
+	return seen != nil && !seen.Truncate(time.Millisecond).Equal(current.Truncate(time.Millisecond))
+}
+
 type ItemService interface {
 	Create(userID uuid.UUID, req CreateItemRequest) (*models.Item, error)
 	GetByID(userID uuid.UUID, id uuid.UUID) (*ItemDetailResponse, error)
@@ -44,6 +50,8 @@ type ItemService interface {
 	Update(userID uuid.UUID, id uuid.UUID, req UpdateItemRequest) (*models.Item, error)
 	Move(userID uuid.UUID, id uuid.UUID, targetBoxID uuid.UUID) error
 	UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity float64, reason, note string) error
+	// AdjustQuantity adds delta (may be negative) atomically and returns the new quantity.
+	AdjustQuantity(userID uuid.UUID, id uuid.UUID, delta float64, reason, note string) (float64, error)
 	Movements(userID uuid.UUID, id uuid.UUID) (*MovementHistory, error)
 	Delete(userID uuid.UUID, id uuid.UUID) error
 }
@@ -72,6 +80,8 @@ type CreateItemRequest struct {
 }
 
 type UpdateItemRequest struct {
+	// UpdatedAt is the version the client last saw; when set and stale the update is rejected with 409.
+	UpdatedAt          *time.Time             `json:"updatedAt"`
 	Name               *string                `json:"name"`
 	Description        *string                `json:"description"`
 	BoxID              *uuid.UUID             `json:"boxId"`
@@ -95,9 +105,11 @@ type UpdateItemRequest struct {
 
 type ItemDetailResponse struct {
 	*models.Item
-	Breadcrumbs    []models.BreadcrumbItem `json:"breadcrumbs"`
-	CurrentLoan    *models.LendingRecord   `json:"currentLoan,omitempty"`
-	LendingHistory []models.LendingRecord  `json:"lendingHistory"`
+	Breadcrumbs []models.BreadcrumbItem `json:"breadcrumbs"`
+	CurrentLoan *models.LendingRecord   `json:"currentLoan,omitempty"`
+	// ActiveLoans lists every open loan, including partial ones that leave status unchanged.
+	ActiveLoans    []models.LendingRecord `json:"activeLoans"`
+	LendingHistory []models.LendingRecord `json:"lendingHistory"`
 }
 
 type itemService struct {
@@ -256,7 +268,10 @@ func (s *itemService) GetByID(userID uuid.UUID, id uuid.UUID) (*ItemDetailRespon
 	// Current active loan if item is lent
 	var currentLoan *models.LendingRecord
 	if item.Status == "lent" {
-		loan, _ := s.lendingRepo.GetActiveLoanByItemID(item.ID)
+		loan, err := s.lendingRepo.GetActiveLoanByItemID(userID, item.ID)
+		if err != nil {
+			log.Printf("item %s: could not load active loan: %v", item.ID, err)
+		}
 		currentLoan = loan
 	}
 
@@ -266,10 +281,18 @@ func (s *itemService) GetByID(userID uuid.UUID, id uuid.UUID) (*ItemDetailRespon
 		history = []models.LendingRecord{}
 	}
 
+	active := []models.LendingRecord{}
+	for _, l := range history {
+		if l.ActualReturnDate == nil {
+			active = append(active, l)
+		}
+	}
+
 	return &ItemDetailResponse{
 		Item:           item,
 		Breadcrumbs:    breadcrumbs,
 		CurrentLoan:    currentLoan,
+		ActiveLoans:    active,
 		LendingHistory: history,
 	}, nil
 }
@@ -306,6 +329,9 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 	if err != nil {
 		return nil, apperr.NotFoundOr(err, "item not found")
 	}
+	if isStale(req.UpdatedAt, item.UpdatedAt) {
+		return nil, apperr.Conflict("item was modified since you last loaded it, please reload and try again")
+	}
 
 	if req.Name != nil {
 		item.Name = *req.Name
@@ -313,12 +339,14 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 	if req.Description != nil {
 		item.Description = *req.Description
 	}
+	var movedTo *models.Box
 	if req.BoxID != nil && *req.BoxID != item.BoxID {
 		box, err := s.boxRepo.GetByID(*req.BoxID, userID)
 		if err != nil || box == nil {
 			return nil, apperr.NotFound("target box does not exist or does not belong to you")
 		}
 		item.BoxID = *req.BoxID
+		movedTo = box
 	}
 	if req.CategoryID != nil {
 		categoryName, err := s.resolveCategory(userID, *req.CategoryID)
@@ -405,6 +433,10 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 	if item.Quantity != oldQuantity {
 		s.recordMovement(item, item.Quantity-oldQuantity, models.MovementAdjust, "")
 	}
+	if movedTo != nil {
+		s.recordMovement(item, 0, models.MovementMove, "to "+movedTo.Name)
+		item.BoxName = movedTo.Name
+	}
 
 	item.IsLowStock = item.ComputeIsLowStock()
 	return item, nil
@@ -420,7 +452,7 @@ func (s *itemService) Move(userID uuid.UUID, id uuid.UUID, targetBoxID uuid.UUID
 		return err
 	}
 	if item, err := s.itemRepo.GetByID(id, userID); err == nil && item != nil {
-		s.recordMovement(item, 0, models.MovementMove, "box "+targetBoxID.String())
+		s.recordMovement(item, 0, models.MovementMove, "to "+box.Name)
 	}
 	return nil
 }
@@ -429,25 +461,34 @@ func (s *itemService) UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity fl
 	if quantity < 0 {
 		return apperr.Invalid("quantity cannot be negative")
 	}
-	if reason == "" {
-		reason = models.MovementAdjust
-	}
-	if !models.ValidMovementReasons[reason] {
-		return apperr.Invalid("reason must be one of: restock, consume, damaged, lost, correction, adjust")
-	}
-	item, err := s.itemRepo.GetByID(id, userID)
-	if err != nil || item == nil {
-		return apperr.NotFound("item not found")
-	}
-	old := item.Quantity
-	if err := s.itemRepo.UpdateQuantity(id, userID, quantity); err != nil {
+	reason, err := checkMovementReason(reason)
+	if err != nil {
 		return err
 	}
-	item.Quantity = quantity
-	if quantity != old {
-		s.recordMovement(item, quantity-old, reason, note)
+	_, _, err = s.itemRepo.ChangeQuantity(id, userID, repository.QuantityChange{Set: &quantity, Reason: reason, Note: note})
+	return err
+}
+
+func (s *itemService) AdjustQuantity(userID uuid.UUID, id uuid.UUID, delta float64, reason, note string) (float64, error) {
+	reason, err := checkMovementReason(reason)
+	if err != nil {
+		return 0, err
 	}
-	return nil
+	item, _, err := s.itemRepo.ChangeQuantity(id, userID, repository.QuantityChange{Delta: &delta, Reason: reason, Note: note})
+	if err != nil {
+		return 0, err
+	}
+	return item.Quantity, nil
+}
+
+func checkMovementReason(reason string) (string, error) {
+	if reason == "" {
+		return models.MovementAdjust, nil
+	}
+	if !models.ValidMovementReasons[reason] {
+		return "", apperr.Invalid("reason must be one of: restock, consume, damaged, lost, correction, adjust")
+	}
+	return reason, nil
 }
 
 // MovementHistory is the audit trail of an item plus a consumption estimate.

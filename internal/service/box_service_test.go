@@ -104,6 +104,13 @@ func (m *mockBoxRepo) IsDescendant(boxID, potentialDescendantID, userID uuid.UUI
 	return false, nil
 }
 
+func (m *mockBoxRepo) Move(id, userID uuid.UUID, newParentID *uuid.UUID) error {
+	if b, ok := m.boxes[id]; ok {
+		b.ParentID = newParentID
+	}
+	return nil
+}
+
 type mockItemRepoForBox struct {
 	repository.ItemRepository
 }

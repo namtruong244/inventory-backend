@@ -14,7 +14,7 @@ func TestJWTGenerationAndValidation(t *testing.T) {
 	email := "user@example.com"
 	role := "Owner"
 
-	token, err := utils.GenerateToken(userID, email, role, secret, 24)
+	token, err := utils.GenerateToken(userID, email, role, 0, secret, 24)
 	if err != nil {
 		t.Fatalf("failed to generate token: %v", err)
 	}

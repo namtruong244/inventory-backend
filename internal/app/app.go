@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,10 +15,25 @@ import (
 	"inventory_backend/internal/storage"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 // SetupRouter initializes repositories, services, handlers, and the Gin engine.
+// TrashRetentionDays is how long soft-deleted data stays restorable before the
+// scheduled purge removes it for good.
+const TrashRetentionDays = 30
+
+// NewTrashPurger builds the job run by the scheduled (EventBridge) Lambda event.
+func NewTrashPurger(cfg *config.Config, db *gorm.DB) (func() (int64, error), error) {
+	storageProvider, err := storage.NewStorageProvider(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize storage provider: %w", err)
+	}
+	svc := service.NewTrashService(repository.NewTrashRepository(db), service.WithTrashFileStorage(storageProvider))
+	return func() (int64, error) { return svc.PurgeExpired(TrashRetentionDays) }, nil
+}
+
 func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	// Set Gin mode
 	if cfg.AppEnv == "production" {
@@ -39,12 +55,12 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	lendingRepo := repository.NewLendingRepository(db)
 
 	// 3. Initialize Services
-	authService := service.NewAuthService(userRepo, settingsRepo, cfg)
+	authService := service.NewAuthService(userRepo, settingsRepo, cfg, service.WithFileStorage(storageProvider))
 	settingsService := service.NewSettingsService(settingsRepo, userRepo)
 	categoryService := service.NewCategoryService(categoryRepo)
 	boxService := service.NewBoxService(boxRepo, itemRepo)
 	itemService := service.NewItemService(itemRepo, boxRepo, lendingRepo, settingsRepo, categoryRepo, repository.NewMovementRepository(db))
-	lendingService := service.NewLendingService(lendingRepo, itemRepo)
+	lendingService := service.NewLendingService(lendingRepo, itemRepo, settingsRepo)
 	scanService := service.NewScanService(boxRepo, itemRepo)
 	alertService := service.NewAlertService(db, settingsRepo, lendingRepo)
 	reportService := service.NewReportService(db, itemRepo, boxRepo, settingsRepo)
@@ -57,7 +73,8 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	boxHandler := handler.NewBoxHandler(boxService)
 	itemHandler := handler.NewItemHandler(itemService)
 	lendingHandler := handler.NewLendingHandler(lendingService)
-	trashHandler := handler.NewTrashHandler(service.NewTrashService(repository.NewTrashRepository(db)))
+	trashService := service.NewTrashService(repository.NewTrashRepository(db), service.WithTrashFileStorage(storageProvider))
+	trashHandler := handler.NewTrashHandler(trashService)
 	scanHandler := handler.NewScanHandler(scanService)
 	alertHandler := handler.NewAlertHandler(alertService)
 	reportHandler := handler.NewReportHandler(reportService)
@@ -100,6 +117,8 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	{
 		// Public Authentication Routes
 		authGroup := v1.Group("/auth")
+		// 30 login/register attempts per IP per 15 minutes.
+		authGroup.Use(middleware.NewRateLimiter(30, 15*time.Minute).Middleware())
 		{
 			authGroup.POST("/register", authHandler.Register)
 			authGroup.POST("/login", authHandler.Login)
@@ -108,10 +127,22 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 
 		// Protected Routes
 		protected := v1.Group("")
-		protected.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		protected.Use(middleware.AuthMiddleware(cfg.JWTSecret, func(id uuid.UUID, tv int) (bool, error) {
+			u, err := userRepo.GetByID(id)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			return u != nil && u.TokenVersion == tv, nil
+		}))
 		{
 			// Auth Profile
 			protected.GET("/auth/me", authHandler.Me)
+			protected.DELETE("/auth/me", authHandler.DeleteMe)
+			protected.POST("/auth/refresh", authHandler.Refresh)
+			protected.POST("/auth/logout-all", authHandler.LogoutAll)
 
 			// Settings & Profile
 			protected.GET("/settings", settingsHandler.GetSettings)

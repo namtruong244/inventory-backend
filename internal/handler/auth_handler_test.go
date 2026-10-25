@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type mockUserRepo struct {
@@ -47,6 +48,25 @@ func (m *mockUserRepo) GetByID(id uuid.UUID) (*models.User, error) {
 func (m *mockUserRepo) Update(user *models.User) error {
 	m.users[user.Email] = user
 	return nil
+}
+
+func (m *mockUserRepo) BumpTokenVersion(id uuid.UUID) error {
+	for _, u := range m.users {
+		if u.ID == id {
+			u.TokenVersion++
+		}
+	}
+	return nil
+}
+
+func (m *mockUserRepo) DeleteAccount(id uuid.UUID) ([]string, error) {
+	for email, u := range m.users {
+		if u.ID == id {
+			delete(m.users, email)
+			return nil, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
 }
 
 type mockSettingsRepo struct{}

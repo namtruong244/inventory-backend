@@ -24,7 +24,13 @@ type BoxRepository interface {
 	CountsByBox(userID uuid.UUID) (items map[uuid.UUID]int64, subBoxes map[uuid.UUID]int64, err error)
 	GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]models.BreadcrumbItem, error)
 	IsDescendant(boxID, potentialDescendantID, userID uuid.UUID) (bool, error)
+	// Move re-parents a box (nil = root). The cycle check and the write run in one
+	// transaction serialized per user, so concurrent moves cannot create a loop.
+	Move(id, userID uuid.UUID, newParentID *uuid.UUID) error
 }
+
+// maxBoxDepth bounds recursive tree queries so a corrupt cycle cannot loop forever.
+const maxBoxDepth = 64
 
 type boxRepo struct {
 	db *gorm.DB
@@ -209,6 +215,7 @@ func (r *boxRepo) GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]models.Br
 			SELECT b.id, b.name, b.parent_id, p.depth + 1
 			FROM boxes b
 			JOIN box_path p ON b.id = p.parent_id
+			WHERE p.depth < 64
 		)
 		SELECT CAST(id AS TEXT) as id, name FROM box_path ORDER BY depth DESC;
 	`
@@ -217,15 +224,51 @@ func (r *boxRepo) GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]models.Br
 }
 
 func (r *boxRepo) IsDescendant(boxID, potentialDescendantID, userID uuid.UUID) (bool, error) {
+	return isDescendant(r.db, boxID, potentialDescendantID, userID)
+}
+
+func isDescendant(db *gorm.DB, boxID, potentialDescendantID, userID uuid.UUID) (bool, error) {
 	var count int64
 	cteQuery := `
 		WITH RECURSIVE descendants AS (
-			SELECT id FROM boxes WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL
+			SELECT id, 1 AS depth FROM boxes WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL
 			UNION ALL
-			SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id WHERE b.user_id = ? AND b.deleted_at IS NULL
+			SELECT b.id, d.depth + 1 FROM boxes b JOIN descendants d ON b.parent_id = d.id
+			WHERE b.user_id = ? AND b.deleted_at IS NULL AND d.depth < ?
 		)
 		SELECT COUNT(*) FROM descendants WHERE id = ?;
 	`
-	err := r.db.Raw(cteQuery, boxID, userID, userID, potentialDescendantID).Scan(&count).Error
+	err := db.Raw(cteQuery, boxID, userID, userID, maxBoxDepth, potentialDescendantID).Scan(&count).Error
 	return count > 0, err
+}
+
+func (r *boxRepo) Move(id, userID uuid.UUID, newParentID *uuid.UUID) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// One tree per user: serialize all moves of that tree until commit.
+		if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", userID.String()).Error; err != nil {
+			return err
+		}
+		var box models.Box
+		if err := tx.Where("id = ? AND user_id = ?", id, userID).First(&box).Error; err != nil {
+			return apperr.NotFoundOr(err, "box not found")
+		}
+		if newParentID != nil {
+			if *newParentID == id {
+				return apperr.Invalid("cannot move a box inside itself")
+			}
+			var parent models.Box
+			if err := tx.Where("id = ? AND user_id = ?", *newParentID, userID).First(&parent).Error; err != nil {
+				return apperr.NotFoundOr(err, "target parent box not found")
+			}
+			isDesc, err := isDescendant(tx, id, *newParentID, userID)
+			if err != nil {
+				return err
+			}
+			if isDesc {
+				return apperr.Invalid("cannot move a box inside one of its own sub-boxes (cycle detected)")
+			}
+		}
+		return tx.Model(&models.Box{}).Where("id = ? AND user_id = ?", id, userID).
+			Updates(map[string]interface{}{"parent_id": newParentID, "updated_at": time.Now().UTC()}).Error
+	})
 }

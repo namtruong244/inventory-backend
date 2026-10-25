@@ -34,13 +34,15 @@ type Item struct {
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"deletedAt,omitempty" swaggertype:"string"`
 
 	// Virtual fields for response
-	IsLowStock   bool   `gorm:"-" json:"isLowStock"`
-	BoxName      string `gorm:"-" json:"boxName,omitempty"`
-	CategoryName string `gorm:"-" json:"categoryName,omitempty"`
+	// LentQuantity is the units out on open partial loans (already subtracted from Quantity).
+	LentQuantity float64 `gorm:"-" json:"lentQuantity"`
+	IsLowStock   bool    `gorm:"-" json:"isLowStock"`
+	BoxName      string  `gorm:"-" json:"boxName,omitempty"`
+	CategoryName string  `gorm:"-" json:"categoryName,omitempty"`
 }
 
 func (i *Item) ComputeIsLowStock() bool {
-	if i.MinQuantity != nil && i.Quantity <= *i.MinQuantity {
+	if i.MinQuantity != nil && i.Quantity+i.LentQuantity <= *i.MinQuantity {
 		return true
 	}
 	return false

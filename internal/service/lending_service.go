@@ -7,6 +7,7 @@ import (
 	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
+	"inventory_backend/internal/utils"
 
 	"github.com/google/uuid"
 )
@@ -33,14 +34,27 @@ type LendItemRequest struct {
 }
 
 type lendingService struct {
-	lendingRepo repository.LendingRepository
-	itemRepo    repository.ItemRepository
+	lendingRepo  repository.LendingRepository
+	itemRepo     repository.ItemRepository
+	settingsRepo repository.SettingsRepository
 }
 
-func NewLendingService(lendingRepo repository.LendingRepository, itemRepo repository.ItemRepository) LendingService {
+// todayFor is the user's local calendar date (YYYY-MM-DD) from their timezone setting.
+func todayFor(settingsRepo repository.SettingsRepository, userID uuid.UUID) string {
+	tz := "UTC"
+	if settingsRepo != nil {
+		if st, err := settingsRepo.GetByUserID(userID); err == nil && st != nil {
+			tz = st.Timezone
+		}
+	}
+	return utils.TodayIn(tz)
+}
+
+func NewLendingService(lendingRepo repository.LendingRepository, itemRepo repository.ItemRepository, settingsRepo repository.SettingsRepository) LendingService {
 	return &lendingService{
-		lendingRepo: lendingRepo,
-		itemRepo:    itemRepo,
+		lendingRepo:  lendingRepo,
+		itemRepo:     itemRepo,
+		settingsRepo: settingsRepo,
 	}
 }
 
@@ -88,6 +102,10 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 	// Business Rule 3: Lending Integrity — checked and applied atomically in the repository
 	item, err := s.lendingRepo.LendItem(userID, record)
 	if err != nil {
+		// A client-chosen id may already belong to another user's record.
+		if apperr.IsUnique(err) {
+			return nil, apperr.Conflict("a lending record with this id already exists")
+		}
 		return nil, translateLendingErr(err)
 	}
 
@@ -123,7 +141,7 @@ func (s *lendingService) GetActiveLoans(userID uuid.UUID) ([]models.LendingRecor
 }
 
 func (s *lendingService) GetOverdueLoans(userID uuid.UUID) ([]models.LendingRecord, error) {
-	return s.lendingRepo.ListOverdue(userID)
+	return s.lendingRepo.ListOverdue(userID, todayFor(s.settingsRepo, userID))
 }
 
 func (s *lendingService) GetHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([]models.LendingRecord, error) {

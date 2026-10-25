@@ -115,6 +115,8 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			}
 		}
 
+		normalizeUserEmails(db)
+
 		// Seed system defaults
 		if err := SeedDefaultCategories(db); err != nil {
 			log.Printf("Warning: Seeding default categories failed: %v\n", err)
@@ -125,6 +127,31 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		log.Println("Skipping database migrations (RUN_MIGRATIONS=false)")
 	}
 	return db, nil
+}
+
+// normalizeUserEmails lower-cases stored emails and makes them unique
+// case-insensitively. Accounts that only differ by case cannot be merged
+// automatically (they own separate data), so when such duplicates exist this
+// only logs them for manual cleanup and retries on the next start.
+func normalizeUserEmails(db *gorm.DB) {
+	var dups []string
+	if err := db.Raw(`SELECT LOWER(TRIM(email)) FROM users GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1`).Scan(&dups).Error; err != nil {
+		log.Printf("Warning: email duplicate check skipped: %v\n", err)
+		return
+	}
+	if len(dups) > 0 {
+		log.Printf("Warning: users with emails differing only by case/whitespace, merge them then restart: %v\n", dups)
+		return
+	}
+	for _, stmt := range []string{
+		"UPDATE users SET email = LOWER(TRIM(email)) WHERE email <> LOWER(TRIM(email));",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower ON users (LOWER(email));",
+	} {
+		if err := db.Exec(stmt).Error; err != nil {
+			log.Printf("Warning: email normalization skipped (%.50s...): %v\n", stmt, err)
+			return
+		}
+	}
 }
 
 // addForeignKey returns an idempotent statement adding a foreign key.

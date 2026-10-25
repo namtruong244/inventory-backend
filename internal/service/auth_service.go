@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,16 +14,34 @@ import (
 	"inventory_backend/internal/config"
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
+	"inventory_backend/internal/storage"
 	"inventory_backend/internal/utils"
+
+	"inventory_backend/internal/apperr"
 
 	"github.com/google/uuid"
 )
+
+// NormalizeEmail is the canonical stored form of an email address.
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// registerFailedMsg is deliberately the same for "already registered" and a
+// lost unique-index race, so the endpoint cannot be used to list accounts.
+const registerFailedMsg = "Could not create the account. If you already have one, try signing in."
 
 type AuthService interface {
 	Register(name, email, password string) (*AuthResult, error)
 	Login(email, password string) (*AuthResult, error)
 	LoginWithGoogle(email, name string, avatarURL *string, idToken *string) (*AuthResult, error)
 	GetProfile(userID uuid.UUID) (*models.User, error)
+	// Refresh issues a fresh token for an already-authenticated user.
+	Refresh(userID uuid.UUID) (*AuthResult, error)
+	// RevokeAllTokens invalidates every token issued so far (logout everywhere).
+	RevokeAllTokens(userID uuid.UUID) error
+	// DeleteAccount permanently removes the user and all their data.
+	DeleteAccount(userID uuid.UUID) error
 }
 
 type AuthResult struct {
@@ -42,25 +62,40 @@ type authService struct {
 	userRepo     repository.UserRepository
 	settingsRepo repository.SettingsRepository
 	cfg          *config.Config
+	files        storage.StorageProvider
 }
 
-func NewAuthService(userRepo repository.UserRepository, settingsRepo repository.SettingsRepository, cfg *config.Config) AuthService {
-	return &authService{
+// AuthOption customises optional dependencies of the auth service.
+type AuthOption func(*authService)
+
+// WithFileStorage lets DeleteAccount remove the user's uploaded media too.
+func WithFileStorage(p storage.StorageProvider) AuthOption {
+	return func(s *authService) { s.files = p }
+}
+
+func NewAuthService(userRepo repository.UserRepository, settingsRepo repository.SettingsRepository, cfg *config.Config, opts ...AuthOption) AuthService {
+	s := &authService{
 		userRepo:     userRepo,
 		settingsRepo: settingsRepo,
 		cfg:          cfg,
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 func (s *authService) Register(name, email, password string) (*AuthResult, error) {
+	email = NormalizeEmail(email)
+	name = strings.TrimSpace(name)
 	if email == "" || password == "" || name == "" {
-		return nil, errors.New("name, email and password are required")
+		return nil, apperr.Invalid("name, email and password are required")
 	}
 
 	// Check existing user
 	existing, _ := s.userRepo.GetByEmail(email)
 	if existing != nil {
-		return nil, errors.New("email is already registered")
+		return nil, apperr.Invalid(registerFailedMsg)
 	}
 
 	hashedPassword, err := utils.HashPassword(password)
@@ -77,13 +112,16 @@ func (s *authService) Register(name, email, password string) (*AuthResult, error
 	}
 
 	if err := s.userRepo.Create(user); err != nil {
+		if apperr.IsUnique(err) {
+			return nil, apperr.Invalid(registerFailedMsg)
+		}
 		return nil, err
 	}
 
 	// Create initial default user settings
 	_ = s.settingsRepo.Create(models.NewDefaultSettings(user.ID))
 
-	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
+	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, user.TokenVersion, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
 	if err != nil {
 		return nil, err
 	}
@@ -102,16 +140,16 @@ func (s *authService) Register(name, email, password string) (*AuthResult, error
 }
 
 func (s *authService) Login(email, password string) (*AuthResult, error) {
-	user, err := s.userRepo.GetByEmail(email)
-	if err != nil {
-		return nil, errors.New("invalid email or password")
+	user, err := s.userRepo.GetByEmail(NormalizeEmail(email))
+	if err != nil || user == nil {
+		return nil, apperr.Invalid("invalid email or password")
 	}
 
 	if user.PasswordHash == nil || *user.PasswordHash == "" || !utils.CheckPasswordHash(password, *user.PasswordHash) {
-		return nil, errors.New("invalid email or password")
+		return nil, apperr.Invalid("invalid email or password")
 	}
 
-	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
+	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, user.TokenVersion, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +226,7 @@ func verifyGoogleToken(idToken, expectedClientID string) (*GoogleTokenInfo, erro
 // request body is never trusted. Tokens prefixed "mock_" are accepted only when APP_ENV=test.
 func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idToken *string) (*AuthResult, error) {
 	if idToken == nil || *idToken == "" {
-		return nil, errors.New("id_token is required")
+		return nil, apperr.Invalid("id_token is required")
 	}
 
 	if strings.HasPrefix(*idToken, "mock_") {
@@ -198,7 +236,8 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 	} else {
 		info, err := verifyGoogleToken(*idToken, s.cfg.GoogleClientID)
 		if err != nil {
-			return nil, fmt.Errorf("google authentication failed: %w", err)
+			log.Printf("google login: token verification failed: %v", err)
+			return nil, apperr.Invalid("Google authentication failed")
 		}
 		email = info.Email
 		if info.Name != "" && (name == "" || name == "Google User") {
@@ -209,8 +248,9 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 		}
 	}
 
+	email = NormalizeEmail(email)
 	if email == "" {
-		return nil, errors.New("email is required")
+		return nil, apperr.Invalid("email is required")
 	}
 	if name == "" {
 		name = "Google User"
@@ -225,7 +265,13 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 		if user.Name == "" || user.Name == "Google User" {
 			user.Name = name
 		}
+		// Register does not verify email ownership, so a local account may have
+		// been created by someone else. Google just proved the real owner, so
+		// drop the password: nobody can keep using the pre-registered credentials.
+		user.PasswordHash = nil
 		user.Provider = "google"
+		// ...and any token issued to the pre-registrant dies with it.
+		user.TokenVersion++
 		if err := s.userRepo.Update(user); err != nil {
 			return nil, err
 		}
@@ -246,7 +292,7 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 		_ = s.settingsRepo.Create(models.NewDefaultSettings(user.ID))
 	}
 
-	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
+	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, user.TokenVersion, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
 	if err != nil {
 		return nil, err
 	}
@@ -266,4 +312,40 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 
 func (s *authService) GetProfile(userID uuid.UUID) (*models.User, error) {
 	return s.userRepo.GetByID(userID)
+}
+
+func (s *authService) Refresh(userID uuid.UUID) (*AuthResult, error) {
+	user, err := s.userRepo.GetByID(userID)
+	if err != nil || user == nil {
+		return nil, errors.New("user not found")
+	}
+	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, user.TokenVersion, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
+	if err != nil {
+		return nil, err
+	}
+	return &AuthResult{Token: token, User: UserResponse{
+		ID: user.ID, Name: user.Name, Email: user.Email, Role: user.Role,
+		AvatarURL: user.AvatarURL, Provider: user.Provider,
+	}}, nil
+}
+
+func (s *authService) RevokeAllTokens(userID uuid.UUID) error {
+	return s.userRepo.BumpTokenVersion(userID)
+}
+
+func (s *authService) DeleteAccount(userID uuid.UUID) error {
+	files, err := s.userRepo.DeleteAccount(userID)
+	if err != nil {
+		return err
+	}
+	if s.files == nil {
+		return nil
+	}
+	// The account is already gone; leftover files are only logged.
+	for _, f := range files {
+		if err := s.files.Delete(context.Background(), f); err != nil {
+			log.Printf("account delete: could not remove %s: %v", f, err)
+		}
+	}
+	return nil
 }

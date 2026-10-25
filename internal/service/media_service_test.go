@@ -18,6 +18,8 @@ func (f *fakeStorage) Upload(ctx context.Context, file io.Reader, filename, cont
 	return "http://x/" + folder + "/" + filename, nil
 }
 
+func (f *fakeStorage) Delete(ctx context.Context, fileURL string) error { return nil }
+
 func fileHeader(t *testing.T, filename string, content []byte) *multipart.FileHeader {
 	t.Helper()
 	var buf bytes.Buffer

@@ -16,6 +16,7 @@ import (
 type mockItemRepo struct {
 	repository.ItemRepository
 	items map[uuid.UUID]*models.Item
+	moves *memMovementRepo
 }
 
 func (m *mockItemRepo) Create(i *models.Item) error { i.ID = uuid.New(); m.items[i.ID] = i; return nil }
@@ -27,9 +28,27 @@ func (m *mockItemRepo) GetByID(id, userID uuid.UUID) (*models.Item, error) {
 	return nil, errors.New("record not found")
 }
 func (m *mockItemRepo) Update(i *models.Item) error { m.items[i.ID] = i; return nil }
-func (m *mockItemRepo) UpdateQuantity(id, userID uuid.UUID, q float64) error {
-	m.items[id].Quantity = q
-	return nil
+func (m *mockItemRepo) ChangeQuantity(id, userID uuid.UUID, c repository.QuantityChange) (*models.Item, float64, error) {
+	it, ok := m.items[id]
+	if !ok || it.UserID != userID {
+		return nil, 0, apperr.NotFound("item not found")
+	}
+	next := it.Quantity
+	if c.Delta != nil {
+		next += *c.Delta
+	} else if c.Set != nil {
+		next = *c.Set
+	}
+	if next < 0 {
+		return nil, 0, apperr.Invalid("quantity cannot be negative")
+	}
+	applied := next - it.Quantity
+	it.Quantity = next
+	if applied != 0 && m.moves != nil {
+		_ = m.moves.Create(&models.StockMovement{UserID: userID, ItemID: id, Delta: applied, QuantityAfter: next, Reason: c.Reason, Note: c.Note})
+	}
+	cp := *it
+	return &cp, applied, nil
 }
 
 type memMovementRepo struct{ list []models.StockMovement }
@@ -49,7 +68,8 @@ func setupItemSvc(t *testing.T) (service.ItemService, uuid.UUID, uuid.UUID) {
 	boxes := newMockBoxRepo()
 	box := &models.Box{ID: uuid.New(), UserID: userID, Name: "b", Label: "b"}
 	boxes.boxes[box.ID] = box
-	svc := service.NewItemService(&mockItemRepo{items: map[uuid.UUID]*models.Item{}}, boxes, nil, nil, anyCategoryRepo{}, &memMovementRepo{})
+	moves := &memMovementRepo{}
+	svc := service.NewItemService(&mockItemRepo{items: map[uuid.UUID]*models.Item{}, moves: moves}, boxes, nil, nil, anyCategoryRepo{}, moves)
 	return svc, userID, box.ID
 }
 

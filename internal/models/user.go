@@ -15,6 +15,8 @@ type User struct {
 	Provider     string    `gorm:"size:50;default:'local'" json:"provider"`
 	ProviderID   *string   `gorm:"size:255" json:"providerId,omitempty"`
 	Role         string    `gorm:"size:50;default:'Owner'" json:"role"`
+	// TokenVersion is embedded in every JWT; bumping it revokes all issued tokens.
+	TokenVersion int       `gorm:"default:0;not null" json:"-"`
 	AvatarURL    *string   `gorm:"type:text" json:"avatarUrl,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`

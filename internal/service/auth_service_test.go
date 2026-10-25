@@ -1,6 +1,7 @@
 package service_test
 
 import (
+	"strings"
 	"testing"
 
 	"inventory_backend/internal/config"
@@ -8,6 +9,7 @@ import (
 	"inventory_backend/internal/service"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type mockUserRepo struct {
@@ -45,6 +47,25 @@ func (m *mockUserRepo) GetByID(id uuid.UUID) (*models.User, error) {
 func (m *mockUserRepo) Update(user *models.User) error {
 	m.users[user.Email] = user
 	return nil
+}
+
+func (m *mockUserRepo) BumpTokenVersion(id uuid.UUID) error {
+	for _, u := range m.users {
+		if u.ID == id {
+			u.TokenVersion++
+		}
+	}
+	return nil
+}
+
+func (m *mockUserRepo) DeleteAccount(id uuid.UUID) ([]string, error) {
+	for email, u := range m.users {
+		if u.ID == id {
+			delete(m.users, email)
+			return nil, nil
+		}
+	}
+	return nil, gorm.ErrRecordNotFound
 }
 
 type mockSettingsRepo struct {
@@ -149,5 +170,61 @@ func TestAuthService_GoogleLoginRejectsUnverified(t *testing.T) {
 		if _, err := newSvc(env).LoginWithGoogle("victim@gmail.com", "Victim", nil, &mock); err == nil {
 			t.Errorf("expected mock token to be rejected in env %q", env)
 		}
+	}
+}
+
+func TestAuthService_GoogleLinkDropsPreRegisteredPassword(t *testing.T) {
+	cfg := &config.Config{AppEnv: "test", JWTSecret: "s", JWTExpirationHours: 1}
+	svc := service.NewAuthService(newMockUserRepo(), newMockSettingsRepo(), cfg)
+
+	if _, err := svc.Register("Attacker", "victim@example.com", "attackerpass1"); err != nil {
+		t.Fatal(err)
+	}
+	tok := "mock_token"
+	if _, err := svc.LoginWithGoogle("victim@example.com", "Victim", nil, &tok); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Login("victim@example.com", "attackerpass1"); err == nil {
+		t.Fatal("pre-registered password must stop working after Google link")
+	}
+}
+
+func TestAuthService_DeleteAccount(t *testing.T) {
+	cfg := &config.Config{AppEnv: "test", JWTSecret: "s", JWTExpirationHours: 1}
+	svc := service.NewAuthService(newMockUserRepo(), newMockSettingsRepo(), cfg)
+
+	res, err := svc.Register("U", "u@example.com", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteAccount(res.User.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := svc.Login("u@example.com", "password123"); err == nil {
+		t.Fatal("login must fail after account deletion")
+	}
+}
+
+func TestAuthService_EmailIsNormalized(t *testing.T) {
+	cfg := &config.Config{AppEnv: "test", JWTSecret: "s", JWTExpirationHours: 1}
+	svc := service.NewAuthService(newMockUserRepo(), newMockSettingsRepo(), cfg)
+
+	res, err := svc.Register("U", "  User@Example.COM ", "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.User.Email != "user@example.com" {
+		t.Fatalf("stored email = %q", res.User.Email)
+	}
+	if _, err := svc.Login("USER@example.com", "password123"); err != nil {
+		t.Fatalf("login with different case: %v", err)
+	}
+	_, err = svc.Register("Other", "user@EXAMPLE.com", "password123")
+	if err == nil {
+		t.Fatal("registering the same email in another case must fail")
+	}
+	// The message must not confirm that the address exists.
+	if strings.Contains(strings.ToLower(err.Error()), "already registered") {
+		t.Fatalf("register error leaks account existence: %v", err)
 	}
 }
