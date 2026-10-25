@@ -28,7 +28,7 @@ func (h *ReportHandler) InventoryHealth(c *gin.Context) {
 
 	health, err := h.reportService.GetInventoryHealth(userID)
 	if err != nil {
-		SendError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+		fail(c, "INTERNAL_ERROR", err)
 		return
 	}
 

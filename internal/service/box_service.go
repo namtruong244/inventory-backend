@@ -1,7 +1,7 @@
 package service
 
 import (
-	"errors"
+	"inventory_backend/internal/apperr"
 	"strings"
 
 	"inventory_backend/internal/models"
@@ -55,23 +55,30 @@ func NewBoxService(boxRepo repository.BoxRepository, itemRepo repository.ItemRep
 	}
 }
 
+var validBoxTypes = map[string]bool{
+	"room": true, "cabinet": true, "shelf": true, "box": true, "drawer": true, "other": true,
+}
+
 func (s *boxService) Create(userID uuid.UUID, req CreateBoxRequest) (*models.Box, error) {
 	// Verify label uniqueness
 	existing, _ := s.boxRepo.GetByLabel(req.Label, &userID)
 	if existing != nil {
-		return nil, errors.New("a storage space or box with this label already exists")
+		return nil, apperr.Conflict("a storage space or box with this label already exists")
 	}
 
 	if req.ParentID != nil {
 		parentBox, err := s.boxRepo.GetByID(*req.ParentID, userID)
 		if err != nil || parentBox == nil {
-			return nil, errors.New("parent box not found or does not belong to you")
+			return nil, apperr.NotFound("parent box not found or does not belong to you")
 		}
 	}
 
 	boxType := strings.ToLower(strings.TrimSpace(req.Type))
 	if boxType == "" {
 		boxType = "box"
+	}
+	if !validBoxTypes[boxType] {
+		return nil, apperr.Invalid("invalid box type, must be one of: room, cabinet, shelf, box, drawer, other")
 	}
 
 	box := &models.Box{
@@ -85,7 +92,7 @@ func (s *boxService) Create(userID uuid.UUID, req CreateBoxRequest) (*models.Box
 	}
 
 	if err := s.boxRepo.Create(box); err != nil {
-		return nil, err
+		return nil, apperr.ConflictOnUnique(err, "a storage space or box with this label already exists")
 	}
 
 	return box, nil
@@ -94,7 +101,7 @@ func (s *boxService) Create(userID uuid.UUID, req CreateBoxRequest) (*models.Box
 func (s *boxService) GetByID(userID uuid.UUID, id uuid.UUID) (*BoxDetailResponse, error) {
 	box, err := s.boxRepo.GetByID(id, userID)
 	if err != nil {
-		return nil, errors.New("box not found")
+		return nil, apperr.NotFound("box not found")
 	}
 
 	breadcrumbs, err := s.boxRepo.GetBreadcrumbs(id, userID)
@@ -146,7 +153,7 @@ func (s *boxService) List(userID uuid.UUID, parentIDParam string, tree bool) (in
 	} else {
 		parsed, parseErr := uuid.Parse(parentIDParam)
 		if parseErr != nil {
-			return nil, errors.New("invalid parentId format")
+			return nil, apperr.Invalid("invalid parentId format")
 		}
 		boxes, err = s.boxRepo.ListByParent(userID, &parsed)
 	}
@@ -196,7 +203,7 @@ func (s *boxService) getBoxTree(userID uuid.UUID) ([]*models.Box, error) {
 func (s *boxService) Update(userID uuid.UUID, id uuid.UUID, req UpdateBoxRequest) (*models.Box, error) {
 	box, err := s.boxRepo.GetByID(id, userID)
 	if err != nil {
-		return nil, errors.New("box not found")
+		return nil, apperr.NotFound("box not found")
 	}
 
 	if req.Name != nil {
@@ -205,6 +212,9 @@ func (s *boxService) Update(userID uuid.UUID, id uuid.UUID, req UpdateBoxRequest
 	if req.Type != nil {
 		boxType := strings.ToLower(strings.TrimSpace(*req.Type))
 		if boxType != "" {
+			if !validBoxTypes[boxType] {
+				return nil, apperr.Invalid("invalid box type, must be one of: room, cabinet, shelf, box, drawer, other")
+			}
 			box.Type = boxType
 		}
 	}
@@ -217,13 +227,13 @@ func (s *boxService) Update(userID uuid.UUID, id uuid.UUID, req UpdateBoxRequest
 	if req.Label != nil && *req.Label != box.Label {
 		existing, _ := s.boxRepo.GetByLabel(*req.Label, &userID)
 		if existing != nil && existing.ID != box.ID {
-			return nil, errors.New("label is already taken by another box")
+			return nil, apperr.Conflict("label is already taken by another box")
 		}
 		box.Label = *req.Label
 	}
 
 	if err := s.boxRepo.Update(box); err != nil {
-		return nil, err
+		return nil, apperr.ConflictOnUnique(err, "label is already taken by another box")
 	}
 
 	return box, nil
@@ -232,19 +242,19 @@ func (s *boxService) Update(userID uuid.UUID, id uuid.UUID, req UpdateBoxRequest
 func (s *boxService) Move(userID uuid.UUID, id uuid.UUID, newParentID *uuid.UUID) error {
 	box, err := s.boxRepo.GetByID(id, userID)
 	if err != nil {
-		return errors.New("box not found")
+		return apperr.NotFound("box not found")
 	}
 
 	if newParentID != nil {
 		// Business Rule: Cycle Prevention
 		if *newParentID == box.ID {
-			return errors.New("cannot move a box inside itself")
+			return apperr.Invalid("cannot move a box inside itself")
 		}
 
 		// Ensure new parent exists
 		_, err := s.boxRepo.GetByID(*newParentID, userID)
 		if err != nil {
-			return errors.New("target parent box not found")
+			return apperr.NotFound("target parent box not found")
 		}
 
 		// Check if new parent is a descendant of current box
@@ -253,7 +263,7 @@ func (s *boxService) Move(userID uuid.UUID, id uuid.UUID, newParentID *uuid.UUID
 			return err
 		}
 		if isDesc {
-			return errors.New("cannot move a box inside one of its own sub-boxes (cycle detected)")
+			return apperr.Invalid("cannot move a box inside one of its own sub-boxes (cycle detected)")
 		}
 	}
 

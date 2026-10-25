@@ -26,7 +26,7 @@ func (h *AlertHandler) Summary(c *gin.Context) {
 
 	summary, err := h.alertService.GetSummary(userID)
 	if err != nil {
-		SendError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+		fail(c, "INTERNAL_ERROR", err)
 		return
 	}
 
@@ -42,7 +42,7 @@ func (h *AlertHandler) All(c *gin.Context) {
 
 	alerts, err := h.alertService.GetAll(userID)
 	if err != nil {
-		SendError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+		fail(c, "INTERNAL_ERROR", err)
 		return
 	}
 

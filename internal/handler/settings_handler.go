@@ -48,7 +48,7 @@ func (h *SettingsHandler) UpdateSettings(c *gin.Context) {
 
 	settings, err := h.settingsService.UpdateSettings(userID, req)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "UPDATE_FAILED", err.Error(), nil)
+		fail(c, "UPDATE_FAILED", err)
 		return
 	}
 
@@ -70,7 +70,7 @@ func (h *SettingsHandler) UpdateProfile(c *gin.Context) {
 
 	user, err := h.settingsService.UpdateProfile(userID, req)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "UPDATE_FAILED", err.Error(), nil)
+		fail(c, "UPDATE_FAILED", err)
 		return
 	}
 

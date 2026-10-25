@@ -33,7 +33,7 @@ func (h *LendingHandler) Lend(c *gin.Context) {
 
 	record, err := h.lendingService.LendItem(userID, req)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "LEND_FAILED", err.Error(), nil)
+		fail(c, "LEND_FAILED", err)
 		return
 	}
 
@@ -55,7 +55,7 @@ func (h *LendingHandler) Return(c *gin.Context) {
 
 	err = h.lendingService.ReturnItem(userID, id)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "RETURN_FAILED", err.Error(), nil)
+		fail(c, "RETURN_FAILED", err)
 		return
 	}
 
@@ -71,7 +71,7 @@ func (h *LendingHandler) Active(c *gin.Context) {
 
 	records, err := h.lendingService.GetActiveLoans(userID)
 	if err != nil {
-		SendError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+		fail(c, "INTERNAL_ERROR", err)
 		return
 	}
 
@@ -87,7 +87,7 @@ func (h *LendingHandler) Overdue(c *gin.Context) {
 
 	records, err := h.lendingService.GetOverdueLoans(userID)
 	if err != nil {
-		SendError(c, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+		fail(c, "INTERNAL_ERROR", err)
 		return
 	}
 
@@ -115,7 +115,7 @@ func (h *LendingHandler) History(c *gin.Context) {
 
 	records, err := h.lendingService.GetHistoryByItemID(userID, itemID)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "HISTORY_FAILED", err.Error(), nil)
+		fail(c, "HISTORY_FAILED", err)
 		return
 	}
 

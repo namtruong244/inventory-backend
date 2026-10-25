@@ -5,10 +5,12 @@ import (
 	"strings"
 	"time"
 
+	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/models"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type ItemFilter struct {
@@ -163,30 +165,74 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 	return items, total, nil
 }
 
+// Update writes the item back only if nobody changed it since it was loaded
+// (compared by updated_at); otherwise the caller gets a Conflict instead of
+// silently overwriting the other change.
 func (r *itemRepo) Update(item *models.Item) error {
-	return r.db.Save(item).Error
+	loadedAt := item.UpdatedAt
+	item.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
+	res := r.db.Model(&models.Item{}).
+		Where("id = ? AND user_id = ? AND updated_at = ?", item.ID, item.UserID, loadedAt).
+		Select("*").Omit("id", "user_id", "created_at").
+		Updates(item)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		item.UpdatedAt = loadedAt
+		return apperr.Conflict("item was modified by another request, please reload and try again")
+	}
+	return nil
 }
 
 func (r *itemRepo) Delete(id uuid.UUID, userID uuid.UUID) error {
-	return r.db.Where("id = ? AND user_id = ?", id, userID).Delete(&models.Item{}).Error
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var item models.Item
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", id, userID).
+			First(&item).Error; err != nil {
+			return apperr.NotFoundOr(err, "item not found")
+		}
+		if item.Status == "lent" {
+			return apperr.Conflict("item is currently lent out; return it before deleting")
+		}
+		if err := tx.Where("item_id = ? AND user_id = ?", id, userID).Delete(&models.LendingRecord{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ? AND user_id = ?", id, userID).Delete(&models.Item{}).Error
+	})
 }
 
 func (r *itemRepo) UpdateQuantity(id uuid.UUID, userID uuid.UUID, quantity float64) error {
-	return r.db.Model(&models.Item{}).
+	res := r.db.Model(&models.Item{}).
 		Where("id = ? AND user_id = ?", id, userID).
 		Updates(map[string]interface{}{
 			"quantity":   quantity,
 			"updated_at": time.Now().UTC(),
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return apperr.NotFound("item not found")
+	}
+	return nil
 }
 
 func (r *itemRepo) Move(id uuid.UUID, userID uuid.UUID, targetBoxID uuid.UUID) error {
-	return r.db.Model(&models.Item{}).
+	res := r.db.Model(&models.Item{}).
 		Where("id = ? AND user_id = ?", id, userID).
 		Updates(map[string]interface{}{
 			"box_id":     targetBoxID,
 			"updated_at": time.Now().UTC(),
-		}).Error
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return apperr.NotFound("item not found")
+	}
+	return nil
 }
 
 func (r *itemRepo) CountByUserID(userID uuid.UUID) (int64, error) {

@@ -1,8 +1,9 @@
 package repository
 
 import (
-	"errors"
+	"time"
 
+	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/models"
 
 	"github.com/google/uuid"
@@ -75,8 +76,22 @@ func (r *boxRepo) ListAll(userID uuid.UUID) ([]models.Box, error) {
 	return boxes, err
 }
 
+// Update uses optimistic locking on updated_at, see itemRepo.Update.
 func (r *boxRepo) Update(box *models.Box) error {
-	return r.db.Save(box).Error
+	loadedAt := box.UpdatedAt
+	box.UpdatedAt = time.Now().UTC().Truncate(time.Microsecond)
+	res := r.db.Model(&models.Box{}).
+		Where("id = ? AND user_id = ? AND updated_at = ?", box.ID, box.UserID, loadedAt).
+		Select("*").Omit("id", "user_id", "created_at").
+		Updates(box)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		box.UpdatedAt = loadedAt
+		return apperr.Conflict("box was modified by another request, please reload and try again")
+	}
+	return nil
 }
 
 func (r *boxRepo) CountItemsInBox(boxID, userID uuid.UUID) (int64, error) {
@@ -107,7 +122,7 @@ func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
 	}
 
 	if !cascade && (itemCount > 0 || subBoxCount > 0) {
-		return errors.New("cannot delete box because it contains items or sub-boxes (use cascade=true)")
+		return apperr.Conflict("cannot delete box because it contains items or sub-boxes (use cascade=true)")
 	}
 
 	return r.db.Transaction(func(tx *gorm.DB) error {
@@ -127,6 +142,21 @@ func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
 			}
 
 			allBoxIDs := append(descendantIDs, id)
+
+			var lentCount int64
+			if err := tx.Model(&models.Item{}).
+				Where("box_id IN ? AND user_id = ? AND status = 'lent'", allBoxIDs, userID).
+				Count(&lentCount).Error; err != nil {
+				return err
+			}
+			if lentCount > 0 {
+				return apperr.Conflict("cannot delete: some items inside are currently lent out")
+			}
+			if err := tx.Where("user_id = ? AND item_id IN (?)", userID,
+				tx.Model(&models.Item{}).Select("id").Where("box_id IN ? AND user_id = ?", allBoxIDs, userID)).
+				Delete(&models.LendingRecord{}).Error; err != nil {
+				return err
+			}
 
 			// Delete items in these boxes
 			if err := tx.Where("box_id IN ? AND user_id = ?", allBoxIDs, userID).Delete(&models.Item{}).Error; err != nil {

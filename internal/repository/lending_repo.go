@@ -88,6 +88,7 @@ func (r *lendingRepo) LendItem(userID uuid.UUID, record *models.LendingRecord) (
 			return ErrItemNotLendable
 		}
 
+		record.PreviousStatus = item.Status
 		if err := tx.Create(record).Error; err != nil {
 			return err
 		}
@@ -126,9 +127,13 @@ func (r *lendingRepo) ReturnLoan(userID uuid.UUID, recordID uuid.UUID) error {
 			Update("actual_return_date", now).Error; err != nil {
 			return err
 		}
+		restored := record.PreviousStatus
+		if restored == "" || restored == "lent" {
+			restored = "stored"
+		}
 		return tx.Model(&models.Item{}).
 			Where("id = ? AND user_id = ?", record.ItemID, userID).
-			Update("status", "stored").Error
+			Update("status", restored).Error
 	})
 }
 
