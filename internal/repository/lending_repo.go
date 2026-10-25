@@ -15,6 +15,7 @@ var (
 	ErrItemNotFound      = errors.New("item not found")
 	ErrItemAlreadyLent   = errors.New("item is already currently lent out")
 	ErrItemNotLendable   = errors.New("cannot lend an item with status broken, disposed or lost")
+	ErrQuantityExceeds   = errors.New("quantity exceeds the available stock of the item")
 	ErrLoanNotFound      = errors.New("lending record not found")
 	ErrLoanAlreadyClosed = errors.New("item has already been returned")
 )
@@ -88,7 +89,28 @@ func (r *lendingRepo) LendItem(userID uuid.UUID, record *models.LendingRecord) (
 			return ErrItemNotLendable
 		}
 
+		partial := record.Quantity > 0 && record.Quantity < item.Quantity
+		if record.Quantity > item.Quantity {
+			return ErrQuantityExceeds
+		}
+
 		record.PreviousStatus = item.Status
+		if partial {
+			// Lend part of the stock: the units leave on-hand quantity until returned.
+			record.IsPartial = true
+			if err := tx.Create(record).Error; err != nil {
+				return err
+			}
+			item.Quantity -= record.Quantity
+			if err := tx.Model(&models.Item{}).Where("id = ? AND user_id = ?", item.ID, userID).
+				Updates(map[string]interface{}{"quantity": item.Quantity, "updated_at": time.Now().UTC()}).Error; err != nil {
+				return err
+			}
+			return tx.Create(&models.StockMovement{UserID: userID, ItemID: item.ID, Delta: -record.Quantity,
+				QuantityAfter: item.Quantity, Reason: models.MovementLend, Note: record.BorrowerName}).Error
+		}
+
+		record.Quantity = item.Quantity
 		if err := tx.Create(record).Error; err != nil {
 			return err
 		}
@@ -127,11 +149,26 @@ func (r *lendingRepo) ReturnLoan(userID uuid.UUID, recordID uuid.UUID) error {
 			Update("actual_return_date", now).Error; err != nil {
 			return err
 		}
+		if record.IsPartial {
+			// Put the lent units back on the shelf; the item status never changed.
+			var item models.Item
+			if err := tx.Unscoped().Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("id = ? AND user_id = ?", record.ItemID, userID).First(&item).Error; err != nil {
+				return err
+			}
+			item.Quantity += record.Quantity
+			if err := tx.Unscoped().Model(&models.Item{}).Where("id = ? AND user_id = ?", item.ID, userID).
+				Updates(map[string]interface{}{"quantity": item.Quantity, "updated_at": now}).Error; err != nil {
+				return err
+			}
+			return tx.Create(&models.StockMovement{UserID: userID, ItemID: item.ID, Delta: record.Quantity,
+				QuantityAfter: item.Quantity, Reason: models.MovementReturn, Note: record.BorrowerName}).Error
+		}
 		restored := record.PreviousStatus
 		if restored == "" || restored == "lent" {
 			restored = "stored"
 		}
-		return tx.Model(&models.Item{}).
+		return tx.Unscoped().Model(&models.Item{}).
 			Where("id = ? AND user_id = ?", record.ItemID, userID).
 			Update("status", restored).Error
 	})
@@ -200,7 +237,7 @@ func (r *lendingRepo) populateItemInfo(records []models.LendingRecord) {
 		itemIDs = append(itemIDs, rec.ItemID)
 	}
 	var items []models.Item
-	r.db.Where("id IN ?", itemIDs).Select("id, name, barcode").Find(&items)
+	r.db.Unscoped().Where("id IN ?", itemIDs).Select("id, name, barcode").Find(&items)
 	itemMap := make(map[uuid.UUID]models.Item)
 	for _, it := range items {
 		itemMap[it.ID] = it

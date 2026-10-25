@@ -152,15 +152,16 @@ func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
 		return apperr.Conflict("cannot delete box because it contains items or sub-boxes (use cascade=true)")
 	}
 
+	deletedAt := time.Now().UTC()
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if cascade {
 			// Find all descendant box IDs recursively
 			var descendantIDs []uuid.UUID
 			cteQuery := `
 				WITH RECURSIVE descendants AS (
-					SELECT id FROM boxes WHERE parent_id = ? AND user_id = ?
+					SELECT id FROM boxes WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL
 					UNION ALL
-					SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id WHERE b.user_id = ?
+					SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id WHERE b.user_id = ? AND b.deleted_at IS NULL
 				)
 				SELECT id FROM descendants;
 			`
@@ -179,27 +180,21 @@ func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
 			if lentCount > 0 {
 				return apperr.Conflict("cannot delete: some items inside are currently lent out")
 			}
-			if err := tx.Where("user_id = ? AND item_id IN (?)", userID,
-				tx.Model(&models.Item{}).Select("id").Where("box_id IN ? AND user_id = ?", allBoxIDs, userID)).
-				Delete(&models.LendingRecord{}).Error; err != nil {
+			// Soft delete everything with one timestamp so a restore can bring the subtree back together.
+			if err := tx.Model(&models.Item{}).Where("box_id IN ? AND user_id = ?", allBoxIDs, userID).
+				Update("deleted_at", deletedAt).Error; err != nil {
 				return err
 			}
-
-			// Delete items in these boxes
-			if err := tx.Where("box_id IN ? AND user_id = ?", allBoxIDs, userID).Delete(&models.Item{}).Error; err != nil {
-				return err
-			}
-
-			// Delete descendant boxes
 			if len(descendantIDs) > 0 {
-				if err := tx.Where("id IN ? AND user_id = ?", descendantIDs, userID).Delete(&models.Box{}).Error; err != nil {
+				if err := tx.Model(&models.Box{}).Where("id IN ? AND user_id = ?", descendantIDs, userID).
+					Update("deleted_at", deletedAt).Error; err != nil {
 					return err
 				}
 			}
 		}
 
-		// Delete the target box
-		return tx.Where("id = ? AND user_id = ?", id, userID).Delete(&models.Box{}).Error
+		return tx.Model(&models.Box{}).Where("id = ? AND user_id = ?", id, userID).
+			Update("deleted_at", deletedAt).Error
 	})
 }
 
@@ -225,9 +220,9 @@ func (r *boxRepo) IsDescendant(boxID, potentialDescendantID, userID uuid.UUID) (
 	var count int64
 	cteQuery := `
 		WITH RECURSIVE descendants AS (
-			SELECT id FROM boxes WHERE parent_id = ? AND user_id = ?
+			SELECT id FROM boxes WHERE parent_id = ? AND user_id = ? AND deleted_at IS NULL
 			UNION ALL
-			SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id WHERE b.user_id = ?
+			SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id WHERE b.user_id = ? AND b.deleted_at IS NULL
 		)
 		SELECT COUNT(*) FROM descendants WHERE id = ?;
 	`

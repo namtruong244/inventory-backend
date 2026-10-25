@@ -18,6 +18,8 @@ type Box struct {
 	Icon        *string    `gorm:"size:50" json:"icon,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
 	UpdatedAt   time.Time  `json:"updatedAt"`
+	// DeletedAt is set while the box sits in the trash (soft delete).
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"deletedAt,omitempty" swaggertype:"string"`
 
 	// Virtual / computed response fields
 	ItemCount   int    `gorm:"-" json:"itemCount"`

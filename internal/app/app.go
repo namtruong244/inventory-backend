@@ -57,6 +57,7 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	boxHandler := handler.NewBoxHandler(boxService)
 	itemHandler := handler.NewItemHandler(itemService)
 	lendingHandler := handler.NewLendingHandler(lendingService)
+	trashHandler := handler.NewTrashHandler(service.NewTrashService(repository.NewTrashRepository(db)))
 	scanHandler := handler.NewScanHandler(scanService)
 	alertHandler := handler.NewAlertHandler(alertService)
 	reportHandler := handler.NewReportHandler(reportService)
@@ -147,6 +148,16 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 				itemsGroup.PATCH("/:id/quantity", itemHandler.UpdateQuantity)
 				itemsGroup.GET("/:id/movements", itemHandler.Movements)
 				itemsGroup.DELETE("/:id", itemHandler.Delete)
+			}
+
+			trashGroup := protected.Group("/trash")
+			{
+				trashGroup.GET("", trashHandler.List)
+				trashGroup.DELETE("", trashHandler.Empty)
+				trashGroup.POST("/items/:id/restore", trashHandler.RestoreItem)
+				trashGroup.POST("/boxes/:id/restore", trashHandler.RestoreBox)
+				trashGroup.DELETE("/items/:id", trashHandler.PurgeItem)
+				trashGroup.DELETE("/boxes/:id", trashHandler.PurgeBox)
 			}
 
 			// Lending & Borrowing Tracker

@@ -1116,3 +1116,16 @@ type ScanLookupResponse struct {
 - **Serverless & Containerization:**
   - Hỗ trợ chạy chế độ HTTP Server thông thường (`cmd/api`) hoặc chế độ Serverless AWS Lambda (`cmd/lambda`) qua adapter `aws-lambda-go-api-proxy/gin`.
   - Docker & Docker Compose sẵn sàng đóng gói single binary container siêu nhẹ (Alpine/Distroless).
+
+## Thùng rác (soft delete) — BIZ-5
+
+- `items` và `boxes` có cột `deleted_at`; `DELETE` chỉ đánh dấu xóa mềm (cascade box dùng chung một `deleted_at` để khôi phục cả cây). Lịch sử mượn/kho được giữ nguyên.
+- Index `uq_boxes_user_label_live` chỉ ràng buộc label với box còn sống.
+- Endpoints (cần auth): `GET /trash`, `POST /trash/items/:id/restore`, `POST /trash/boxes/:id/restore`, `DELETE /trash/items/:id`, `DELETE /trash/boxes/:id`, `DELETE /trash?olderThanDays=N` (dọn thùng rác).
+- Không xóa được item đang có khoản mượn mở.
+
+## Mượn một phần — BIZ-1
+
+- `POST /lending/lend` nhận thêm `quantity` (tùy chọn). Bỏ trống hoặc `>= quantity` hiện có → mượn nguyên item (status `lent`). `0 < quantity < tồn kho` → mượn một phần: trừ `items.quantity`, giữ nguyên status, `isPartial = true`; trả lại sẽ cộng số lượng về.
+- `quantity` vượt tồn kho → 400. Nhiều khoản mượn một phần có thể cùng mở trên một item (`uq_lending_open_whole` chỉ chặn khoản mượn nguyên item).
+- `lending_records` có thêm `quantity`, `is_partial`; stock movement có lý do `lend` / `return`.

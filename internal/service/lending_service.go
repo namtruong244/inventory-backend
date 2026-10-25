@@ -26,6 +26,8 @@ type LendItemRequest struct {
 	LentDate           *time.Time `json:"lentDate"`
 	ExpectedReturnDate *time.Time `json:"expectedReturnDate"`
 	Notes              string     `json:"notes"`
+	// Quantity lends only part of the stock (0 < q < item quantity); omit to lend the whole item.
+	Quantity *float64 `json:"quantity"`
 }
 
 type lendingService struct {
@@ -52,7 +54,16 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 		return nil, apperr.Invalid("expectedReturnDate cannot be before lentDate")
 	}
 
+	var quantity float64
+	if req.Quantity != nil {
+		if *req.Quantity <= 0 {
+			return nil, apperr.Invalid("quantity must be greater than 0")
+		}
+		quantity = *req.Quantity
+	}
+
 	record := &models.LendingRecord{
+		Quantity:           quantity,
 		UserID:             userID,
 		ItemID:             req.ItemID,
 		BorrowerName:       req.BorrowerName,
@@ -89,7 +100,7 @@ func translateLendingErr(err error) error {
 		return apperr.NotFound(err.Error())
 	case errors.Is(err, repository.ErrItemAlreadyLent), errors.Is(err, repository.ErrLoanAlreadyClosed):
 		return apperr.Conflict(err.Error())
-	case errors.Is(err, repository.ErrItemNotLendable):
+	case errors.Is(err, repository.ErrItemNotLendable), errors.Is(err, repository.ErrQuantityExceeds):
 		return apperr.Invalid(err.Error())
 	}
 	return err

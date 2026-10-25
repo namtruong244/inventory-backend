@@ -83,9 +83,13 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			"CREATE INDEX IF NOT EXISTS idx_items_user_created ON items(user_id, created_at DESC);",
 
 			// Box labels are unique per user (scan lookup resolves labels within one user)
-			"CREATE UNIQUE INDEX IF NOT EXISTS uq_boxes_user_label ON boxes(user_id, label);",
+			// Soft-deleted boxes keep their label, so uniqueness only covers live rows.
+			"DROP INDEX IF EXISTS uq_boxes_user_label;",
+			"CREATE UNIQUE INDEX IF NOT EXISTS uq_boxes_user_label_live ON boxes(user_id, label) WHERE deleted_at IS NULL;",
 			// An item can have at most one open loan (guards against concurrent lend requests)
-			"CREATE UNIQUE INDEX IF NOT EXISTS uq_lending_open_item ON lending_records(item_id) WHERE actual_return_date IS NULL;",
+			"DROP INDEX IF EXISTS uq_lending_open_item;",
+			// Only whole-item loans are exclusive; partial loans may overlap.
+			"CREATE UNIQUE INDEX IF NOT EXISTS uq_lending_open_whole ON lending_records(item_id) WHERE actual_return_date IS NULL AND is_partial = false;",
 
 			// Referential integrity: no orphaned items, sub-boxes or loans
 			addForeignKey("fk_items_box", "items", "box_id", "boxes", "NO ACTION"),

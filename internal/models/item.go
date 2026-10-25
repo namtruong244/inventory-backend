@@ -30,6 +30,8 @@ type Item struct {
 	CustomAttributes   map[string]interface{} `gorm:"type:jsonb;serializer:json;default:'{}'" json:"customAttributes"`
 	CreatedAt          time.Time              `json:"createdAt"`
 	UpdatedAt          time.Time              `json:"updatedAt"`
+	// DeletedAt is set while the item sits in the trash (soft delete).
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"deletedAt,omitempty" swaggertype:"string"`
 
 	// Virtual fields for response
 	IsLowStock   bool   `gorm:"-" json:"isLowStock"`

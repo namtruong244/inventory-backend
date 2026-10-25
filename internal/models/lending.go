@@ -17,6 +17,10 @@ type LendingRecord struct {
 	ExpectedReturnDate *time.Time `json:"expectedReturnDate"`
 	ActualReturnDate   *time.Time `json:"actualReturnDate"`
 	Notes              string     `gorm:"type:text;default:''" json:"notes"`
+	// Quantity is how many units were lent. IsPartial loans took units out of
+	// items.quantity (put back on return); whole loans lend the item itself.
+	Quantity  float64 `gorm:"type:numeric(12,2);default:0;not null" json:"quantity"`
+	IsPartial bool    `gorm:"default:false;not null" json:"isPartial"`
 	// PreviousStatus is the item status before lending; restored on return.
 	PreviousStatus string    `gorm:"size:30;default:''" json:"-"`
 	CreatedAt      time.Time `json:"createdAt"`

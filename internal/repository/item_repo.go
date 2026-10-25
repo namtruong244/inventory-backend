@@ -202,13 +202,17 @@ func (r *itemRepo) Delete(id uuid.UUID, userID uuid.UUID) error {
 		if item.Status == "lent" {
 			return apperr.Conflict("item is currently lent out; return it before deleting")
 		}
-		if err := tx.Where("item_id = ? AND user_id = ?", id, userID).Delete(&models.LendingRecord{}).Error; err != nil {
+		var openLoans int64
+		if err := tx.Model(&models.LendingRecord{}).
+			Where("item_id = ? AND user_id = ? AND actual_return_date IS NULL", id, userID).Count(&openLoans).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("item_id = ? AND user_id = ?", id, userID).Delete(&models.StockMovement{}).Error; err != nil {
-			return err
+		if openLoans > 0 {
+			return apperr.Conflict("item has open loans; return them before deleting")
 		}
-		return tx.Where("id = ? AND user_id = ?", id, userID).Delete(&models.Item{}).Error
+		// Soft delete: history (loans, movements) stays so the item can be restored.
+		return tx.Model(&models.Item{}).Where("id = ? AND user_id = ?", id, userID).
+			Update("deleted_at", time.Now().UTC()).Error
 	})
 }
 

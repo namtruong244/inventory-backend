@@ -144,3 +144,106 @@ func TestIntegration_UserIsolationAndLending(t *testing.T) {
 		t.Errorf("parallel lend successes = %d, want 1", ok)
 	}
 }
+
+func TestIntegration_TrashRestoreAndPurge(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "t-"+suffix+"@example.com")
+	b := register(t, r, "tb-"+suffix+"@example.com")
+
+	_, out := a.do("POST", "/boxes", map[string]any{"name": "Room", "type": "room", "label": "TR-" + suffix})
+	room := id(out)
+	_, out = a.do("POST", "/boxes", map[string]any{"name": "Shelf", "type": "shelf", "label": "TS-" + suffix, "parentId": room})
+	shelf := id(out)
+	_, out = a.do("POST", "/items", map[string]any{"name": "Cup", "boxId": shelf, "categoryId": "Tools & Hardware"})
+	item := id(out)
+
+	if code, _ := a.do("DELETE", "/boxes/"+room+"?cascade=true", nil); code != http.StatusOK {
+		t.Fatalf("delete box: %d", code)
+	}
+	if code, _ := a.do("GET", "/items/"+item, nil); code != http.StatusNotFound {
+		t.Errorf("trashed item visible: %d", code)
+	}
+	// the label is free again while the box is trashed
+	if code, out := a.do("POST", "/boxes", map[string]any{"name": "New", "type": "room", "label": "TR-" + suffix}); code != http.StatusCreated {
+		t.Fatalf("reuse label: %d %v", code, out)
+	} else if code, _ := a.do("DELETE", "/boxes/"+id(out), nil); code != http.StatusOK {
+		t.Fatalf("delete new box: %d", code)
+	}
+
+	// user B sees nothing and cannot restore
+	_, bt := b.do("GET", "/trash", nil)
+	if n := len(bt["data"].(map[string]any)["boxes"].([]any)); n != 0 {
+		t.Errorf("B sees %d trashed boxes", n)
+	}
+	if code, _ := b.do("POST", "/trash/boxes/"+room+"/restore", nil); code != http.StatusNotFound {
+		t.Errorf("B restored A's box: %d", code)
+	}
+
+	// restoring the old room conflicts with the label of the second (still trashed) one only if both live,
+	// so purge the new one first, then restore the original subtree.
+	_, tr := a.do("GET", "/trash", nil)
+	for _, bx := range tr["data"].(map[string]any)["boxes"].([]any) {
+		m := bx.(map[string]any)
+		if m["id"] != room {
+			a.do("DELETE", "/trash/boxes/"+m["id"].(string), nil)
+		}
+	}
+	if code, out := a.do("POST", "/trash/boxes/"+room+"/restore", nil); code != http.StatusOK {
+		t.Fatalf("restore: %d %v", code, out)
+	}
+	if code, _ := a.do("GET", "/items/"+item, nil); code != http.StatusOK {
+		t.Errorf("item not restored with its box: %d", code)
+	}
+
+	// delete the item alone, then purge it
+	a.do("DELETE", "/items/"+item, nil)
+	if code, _ := a.do("DELETE", "/trash/items/"+item, nil); code != http.StatusOK {
+		t.Errorf("purge item: %d", code)
+	}
+	if code, _ := a.do("POST", "/trash/items/"+item+"/restore", nil); code != http.StatusNotFound {
+		t.Errorf("purged item restorable: %d", code)
+	}
+}
+
+func TestIntegration_PartialLending(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "pl-"+suffix+"@example.com")
+
+	_, out := a.do("POST", "/boxes", map[string]any{"name": "Room", "type": "room", "label": "PL-" + suffix})
+	boxID := id(out)
+	_, out = a.do("POST", "/items", map[string]any{"name": "Bolt", "boxId": boxID, "categoryId": "Tools & Hardware", "quantity": 10})
+	itemID := id(out)
+
+	qty := func() float64 {
+		_, o := a.do("GET", "/items/"+itemID, nil)
+		return o["data"].(map[string]any)["quantity"].(float64)
+	}
+
+	if code, _ := a.do("POST", "/lending/lend", map[string]any{"itemId": itemID, "borrowerName": "x", "quantity": 11}); code == http.StatusCreated {
+		t.Fatalf("lending more than stock must fail")
+	}
+	code, out := a.do("POST", "/lending/lend", map[string]any{"itemId": itemID, "borrowerName": "bob", "quantity": 4})
+	if code != http.StatusCreated {
+		t.Fatalf("partial lend: %d %v", code, out)
+	}
+	loan1 := id(out)
+	if got := qty(); got != 6 {
+		t.Errorf("quantity after partial lend = %v, want 6", got)
+	}
+	// a second partial loan may overlap
+	code, out = a.do("POST", "/lending/lend", map[string]any{"itemId": itemID, "borrowerName": "amy", "quantity": 2})
+	if code != http.StatusCreated {
+		t.Fatalf("second partial lend: %d %v", code, out)
+	}
+	if code, _ := a.do("DELETE", "/items/"+itemID, nil); code == http.StatusOK {
+		t.Errorf("item with open loans must not be deletable")
+	}
+	if code, _ := a.do("POST", "/lending/"+loan1+"/return", map[string]any{}); code != http.StatusOK {
+		t.Fatalf("return: %d", code)
+	}
+	if got := qty(); got != 8 {
+		t.Errorf("quantity after return = %v, want 8", got)
+	}
+}

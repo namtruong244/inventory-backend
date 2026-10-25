@@ -29,6 +29,8 @@ const (
 	MovementCorrection = "correction"
 	MovementAdjust     = "adjust"
 	MovementMove       = "move"
+	MovementLend       = "lend"
+	MovementReturn     = "return"
 )
 
 // ValidMovementReasons are the reasons a client may give when changing a quantity.
