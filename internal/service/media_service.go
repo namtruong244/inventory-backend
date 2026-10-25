@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"inventory_backend/internal/storage"
 
@@ -86,7 +85,7 @@ func (s *mediaService) UploadWithContext(ctx context.Context, file *multipart.Fi
 		return nil, fmt.Errorf("failed to read uploaded file: %w", err)
 	}
 
-	uniqueFilename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), uuid.New().String()[:8], ext)
+	uniqueFilename := uuid.New().String() + ext
 
 	fileURL, err := s.storageProvider.Upload(ctx, src, uniqueFilename, contentType, folder)
 	if err != nil {

@@ -70,7 +70,13 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 
 	// Static file serving only if using local storage
 	if strings.ToLower(cfg.StorageDriver) == "local" || cfg.StorageDriver == "" {
-		router.Static("/uploads", cfg.UploadDir)
+		// Files are unguessable (UUID names) rather than authenticated, so the
+		// headers stop browsers from sniffing or executing them as pages.
+		uploads := router.Group("/uploads", func(c *gin.Context) {
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Header("Content-Security-Policy", "default-src 'none'; sandbox")
+		})
+		uploads.Static("/", cfg.UploadDir)
 	}
 
 	// Health check endpoint
