@@ -54,7 +54,7 @@ func (s *scanService) Lookup(userID uuid.UUID, code string) (*ScanLookupResult, 
 	// 1. Check boxes by label
 	box, err := s.boxRepo.GetByLabel(code, &userID)
 	if err == nil && box != nil {
-		itemCount, _ := s.boxRepo.CountItemsInBox(box.ID)
+		itemCount, _ := s.boxRepo.CountItemsInBox(box.ID, userID)
 		return &ScanLookupResult{
 			Type: "box",
 			Payload: ScanBoxPayload{

@@ -24,6 +24,9 @@ func (h *MediaHandler) Upload(c *gin.Context) {
 		return
 	}
 
+	// Bound the request body (file + small multipart overhead) before parsing the form
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, service.MaxUploadSize+(1<<20))
+
 	file, err := c.FormFile("file")
 	if err != nil {
 		SendError(c, http.StatusBadRequest, "INVALID_FILE", "A binary file is required in 'file' form field", nil)

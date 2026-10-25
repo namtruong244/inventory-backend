@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 
 	"inventory_backend/internal/middleware"
@@ -42,12 +43,17 @@ func (h *ReportHandler) Export(c *gin.Context) {
 	}
 
 	format := c.DefaultQuery("format", "csv")
-	data, contentType, filename, err := h.reportService.ExportItems(userID, format)
-	if err != nil {
-		SendError(c, http.StatusInternalServerError, "EXPORT_FAILED", err.Error(), nil)
-		return
-	}
+	contentType, filename := h.reportService.ExportInfo(format)
 
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
-	c.Data(http.StatusOK, contentType, data)
+	c.Header("Content-Type", contentType)
+	c.Status(http.StatusOK)
+	if err := h.reportService.ExportItems(userID, format, c.Writer); err != nil {
+		log.Printf("export failed for user %s: %v", userID, err)
+		// Once bytes are sent the status is fixed; the client sees a truncated file.
+		if !c.Writer.Written() {
+			c.Header("Content-Disposition", "")
+			SendError(c, http.StatusInternalServerError, "EXPORT_FAILED", "Export failed", nil)
+		}
+	}
 }

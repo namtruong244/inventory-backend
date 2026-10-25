@@ -39,15 +39,6 @@ type GoogleLoginRequest struct {
 	AccessTokenCamel *string `json:"accessToken"`
 }
 
-type AppleLoginRequest struct {
-	Email                  string  `json:"email" binding:"required,email"`
-	Name                   string  `json:"name" binding:"required"`
-	IdentityToken          *string `json:"identity_token"`
-	IdentityTokenCamel     *string `json:"identityToken"`
-	AuthorizationCode      *string `json:"authorization_code"`
-	AuthorizationCodeCamel *string `json:"authorizationCode"`
-}
-
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -104,27 +95,6 @@ func (h *AuthHandler) GoogleLogin(c *gin.Context) {
 	}
 
 	SendSuccess(c, http.StatusOK, result, "Google authentication successful")
-}
-
-func (h *AuthHandler) AppleLogin(c *gin.Context) {
-	var req AppleLoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		SendError(c, http.StatusBadRequest, "INVALID_INPUT", err.Error(), nil)
-		return
-	}
-
-	identityToken := req.IdentityToken
-	if identityToken == nil && req.IdentityTokenCamel != nil {
-		identityToken = req.IdentityTokenCamel
-	}
-
-	result, err := h.authService.LoginWithApple(req.Email, req.Name, identityToken)
-	if err != nil {
-		SendError(c, http.StatusBadRequest, "AUTH_FAILED", err.Error(), nil)
-		return
-	}
-
-	SendSuccess(c, http.StatusOK, result, "Apple authentication successful")
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {

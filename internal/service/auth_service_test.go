@@ -72,8 +72,9 @@ func (m *mockSettingsRepo) Update(s *models.UserSettings) error {
 	return nil
 }
 
-func TestAuthService_GoogleAndAppleLogin(t *testing.T) {
+func TestAuthService_GoogleLogin(t *testing.T) {
 	cfg := &config.Config{
+		AppEnv:             "test",
 		JWTSecret:          "test-secret-key-12345",
 		JWTExpirationHours: 24,
 	}
@@ -109,7 +110,7 @@ func TestAuthService_GoogleAndAppleLogin(t *testing.T) {
 
 	// Test 2: Logging in again via Google updates avatar if provided
 	newAvatar := "https://example.com/new_avatar.png"
-	res2, err := authSvc.LoginWithGoogle("googleuser@gmail.com", "Google User Updated", &newAvatar, nil)
+	res2, err := authSvc.LoginWithGoogle("googleuser@gmail.com", "Google User Updated", &newAvatar, &mockIDToken)
 	if err != nil {
 		t.Fatalf("expected successful Google re-login, got: %v", err)
 	}
@@ -125,26 +126,28 @@ func TestAuthService_GoogleAndAppleLogin(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error for password login on social user without password, got nil")
 	}
+}
 
-	// Test 4: Apple Login - First login creates user with name
-	mockAppleToken := "mock_apple_identity_token"
-	resApple, err := authSvc.LoginWithApple("appleuser@privaterelay.appleid.com", "Alice Apple", &mockAppleToken)
-	if err != nil {
-		t.Fatalf("expected successful Apple login, got: %v", err)
-	}
-	if resApple.User.Provider != "apple" {
-		t.Errorf("expected provider apple, got: %s", resApple.User.Provider)
-	}
-	if resApple.User.Name != "Alice Apple" {
-		t.Errorf("expected name Alice Apple, got: %s", resApple.User.Name)
+func TestAuthService_GoogleLoginRejectsUnverified(t *testing.T) {
+	newSvc := func(env string) service.AuthService {
+		cfg := &config.Config{AppEnv: env, JWTSecret: "s", JWTExpirationHours: 1, GoogleClientID: "client"}
+		return service.NewAuthService(newMockUserRepo(), newMockSettingsRepo(), cfg)
 	}
 
-	// Test 5: Apple Login - Subsequent login with default "Apple User" does NOT overwrite real name
-	resApple2, err := authSvc.LoginWithApple("appleuser@privaterelay.appleid.com", "Apple User", &mockAppleToken)
-	if err != nil {
-		t.Fatalf("expected successful Apple re-login, got: %v", err)
+	// Missing id token must never fall back to trusting the body email
+	if _, err := newSvc("test").LoginWithGoogle("victim@gmail.com", "Victim", nil, nil); err == nil {
+		t.Errorf("expected error when id_token is missing")
 	}
-	if resApple2.User.Name != "Alice Apple" {
-		t.Errorf("expected name to be preserved as Alice Apple, got: %s", resApple2.User.Name)
+	empty := ""
+	if _, err := newSvc("test").LoginWithGoogle("victim@gmail.com", "Victim", nil, &empty); err == nil {
+		t.Errorf("expected error when id_token is empty")
+	}
+
+	// mock_ tokens are only honoured in the test environment
+	mock := "mock_token"
+	for _, env := range []string{"production", "development", ""} {
+		if _, err := newSvc(env).LoginWithGoogle("victim@gmail.com", "Victim", nil, &mock); err == nil {
+			t.Errorf("expected mock token to be rejected in env %q", env)
+		}
 	}
 }

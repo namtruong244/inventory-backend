@@ -72,6 +72,14 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);").Error
 		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_items_custom_attributes ON items USING gin (custom_attributes);").Error
 		_ = db.Exec("CREATE INDEX IF NOT EXISTS idx_lending_active ON lending_records(user_id, actual_return_date);").Error
+		// Box labels are unique per user (scan lookup resolves labels within one user)
+		if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_boxes_user_label ON boxes(user_id, label);").Error; err != nil {
+			log.Printf("Warning: could not create uq_boxes_user_label (duplicate labels exist?): %v", err)
+		}
+		// An item can have at most one open loan (guards against concurrent lend requests)
+		if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_lending_open_item ON lending_records(item_id) WHERE actual_return_date IS NULL;").Error; err != nil {
+			log.Printf("Warning: could not create uq_lending_open_item (duplicate open loans exist?): %v", err)
+		}
 
 		// Seed system defaults
 		if err := SeedDefaultCategories(db); err != nil {

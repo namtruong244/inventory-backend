@@ -66,7 +66,7 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
-	router.Use(middleware.CORSMiddleware())
+	router.Use(middleware.CORSMiddleware(cfg.CORSAllowedOrigins, cfg.AppEnv == "production"))
 
 	// Static file serving only if using local storage
 	if strings.ToLower(cfg.StorageDriver) == "local" || cfg.StorageDriver == "" {
@@ -97,7 +97,6 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 			authGroup.POST("/register", authHandler.Register)
 			authGroup.POST("/login", authHandler.Login)
 			authGroup.POST("/google", authHandler.GoogleLogin)
-			authGroup.POST("/apple", authHandler.AppleLogin)
 		}
 
 		// Protected Routes

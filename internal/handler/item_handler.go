@@ -13,6 +13,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// maxPageLimit caps client-requested page size.
+const maxPageLimit = 200
+
 type ItemHandler struct {
 	itemService service.ItemService
 }
@@ -70,6 +73,9 @@ func (h *ItemHandler) List(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	if limit < 1 {
 		limit = 20
+	}
+	if limit > maxPageLimit {
+		limit = maxPageLimit
 	}
 	filter.Page = page
 	filter.Limit = limit

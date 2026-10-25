@@ -1,12 +1,22 @@
 package repository
 
 import (
+	"errors"
 	"time"
 
 	"inventory_backend/internal/models"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+var (
+	ErrItemNotFound      = errors.New("item not found")
+	ErrItemAlreadyLent   = errors.New("item is already currently lent out")
+	ErrItemNotLendable   = errors.New("cannot lend an item with status broken or disposed")
+	ErrLoanNotFound      = errors.New("lending record not found")
+	ErrLoanAlreadyClosed = errors.New("item has already been returned")
 )
 
 type LendingRepository interface {
@@ -14,6 +24,10 @@ type LendingRepository interface {
 	GetByID(id uuid.UUID, userID uuid.UUID) (*models.LendingRecord, error)
 	GetActiveLoanByItemID(itemID uuid.UUID) (*models.LendingRecord, error)
 	Update(record *models.LendingRecord) error
+	// LendItem atomically checks the item (row-locked), creates the record and marks the item lent.
+	LendItem(userID uuid.UUID, record *models.LendingRecord) (*models.Item, error)
+	// ReturnLoan atomically closes the record (row-locked) and sets the item back to stored.
+	ReturnLoan(userID uuid.UUID, recordID uuid.UUID) error
 	ListActive(userID uuid.UUID) ([]models.LendingRecord, error)
 	ListOverdue(userID uuid.UUID) ([]models.LendingRecord, error)
 	ListHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([]models.LendingRecord, error)
@@ -53,6 +67,69 @@ func (r *lendingRepo) GetActiveLoanByItemID(itemID uuid.UUID) (*models.LendingRe
 
 func (r *lendingRepo) Update(record *models.LendingRecord) error {
 	return r.db.Save(record).Error
+}
+
+func (r *lendingRepo) LendItem(userID uuid.UUID, record *models.LendingRecord) (*models.Item, error) {
+	var item models.Item
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", record.ItemID, userID).
+			First(&item).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrItemNotFound
+			}
+			return err
+		}
+
+		switch item.Status {
+		case "lent":
+			return ErrItemAlreadyLent
+		case "broken", "disposed":
+			return ErrItemNotLendable
+		}
+
+		if err := tx.Create(record).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.Item{}).
+			Where("id = ? AND user_id = ?", item.ID, userID).
+			Update("status", "lent").Error; err != nil {
+			return err
+		}
+		item.Status = "lent"
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *lendingRepo) ReturnLoan(userID uuid.UUID, recordID uuid.UUID) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var record models.LendingRecord
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", recordID, userID).
+			First(&record).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrLoanNotFound
+			}
+			return err
+		}
+		if record.ActualReturnDate != nil {
+			return ErrLoanAlreadyClosed
+		}
+
+		now := time.Now().UTC()
+		if err := tx.Model(&models.LendingRecord{}).
+			Where("id = ? AND user_id = ?", record.ID, userID).
+			Update("actual_return_date", now).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.Item{}).
+			Where("id = ? AND user_id = ?", record.ItemID, userID).
+			Update("status", "stored").Error
+	})
 }
 
 func (r *lendingRepo) ListActive(userID uuid.UUID) ([]models.LendingRecord, error) {

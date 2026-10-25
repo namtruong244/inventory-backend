@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"mime/multipart"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +15,9 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// MaxUploadSize is the largest accepted upload (bytes).
+const MaxUploadSize = 10 << 20
 
 type MediaService interface {
 	Upload(file *multipart.FileHeader, folder string) (*MediaUploadResponse, error)
@@ -56,18 +61,32 @@ func (s *mediaService) UploadWithContext(ctx context.Context, file *multipart.Fi
 		return nil, errors.New("unsupported file extension (allowed: jpg, jpeg, png, webp, gif, heic, pdf)")
 	}
 
-	contentType := file.Header.Get("Content-Type")
-	if contentType == "" || contentType == "application/octet-stream" {
-		contentType = defaultMime
+	if file.Size > MaxUploadSize {
+		return nil, fmt.Errorf("file is too large (max %d MB)", MaxUploadSize>>20)
 	}
-
-	uniqueFilename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), uuid.New().String()[:8], ext)
 
 	src, err := file.Open()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open source file: %w", err)
 	}
 	defer src.Close()
+
+	// Trust the file's actual bytes, not the client-supplied Content-Type or extension.
+	head := make([]byte, 512)
+	n, err := io.ReadFull(src, head)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, fmt.Errorf("failed to read uploaded file: %w", err)
+	}
+	head = head[:n]
+	if !contentMatchesExtension(head, ext) {
+		return nil, errors.New("file content does not match its extension")
+	}
+	contentType := defaultMime
+	if _, err := src.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("failed to read uploaded file: %w", err)
+	}
+
+	uniqueFilename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), uuid.New().String()[:8], ext)
 
 	fileURL, err := s.storageProvider.Upload(ctx, src, uniqueFilename, contentType, folder)
 	if err != nil {
@@ -77,4 +96,34 @@ func (s *mediaService) UploadWithContext(ctx context.Context, file *multipart.Fi
 	return &MediaUploadResponse{
 		URL: fileURL,
 	}, nil
+}
+
+// contentMatchesExtension sniffs the leading bytes and checks they fit the extension.
+func contentMatchesExtension(head []byte, ext string) bool {
+	if ext == ".heic" {
+		// ISO base media file: bytes 4-8 are "ftyp", followed by a HEIF brand
+		if len(head) < 12 || string(head[4:8]) != "ftyp" {
+			return false
+		}
+		switch string(head[8:12]) {
+		case "heic", "heix", "hevc", "hevx", "mif1", "msf1":
+			return true
+		}
+		return false
+	}
+
+	detected := http.DetectContentType(head)
+	switch ext {
+	case ".jpg", ".jpeg":
+		return detected == "image/jpeg"
+	case ".png":
+		return detected == "image/png"
+	case ".webp":
+		return detected == "image/webp"
+	case ".gif":
+		return detected == "image/gif"
+	case ".pdf":
+		return detected == "application/pdf"
+	}
+	return false
 }

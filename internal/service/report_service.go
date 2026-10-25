@@ -1,10 +1,11 @@
 package service
 
 import (
-	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"inventory_backend/internal/models"
@@ -16,7 +17,10 @@ import (
 
 type ReportService interface {
 	GetInventoryHealth(userID uuid.UUID) (*InventoryHealthResponse, error)
-	ExportItems(userID uuid.UUID, format string) ([]byte, string, string, error)
+	// ExportInfo returns the Content-Type and filename for the given format.
+	ExportInfo(format string) (contentType, filename string)
+	// ExportItems streams all items of the user to w in batches.
+	ExportItems(userID uuid.UUID, format string, w io.Writer) error
 }
 
 type HealthBreakdown struct {
@@ -109,87 +113,154 @@ func (s *reportService) GetInventoryHealth(userID uuid.UUID) (*InventoryHealthRe
 	}, nil
 }
 
-func (s *reportService) ExportItems(userID uuid.UUID, format string) ([]byte, string, string, error) {
-	items, _, err := s.itemRepo.List(userID, repository.ItemFilter{Limit: 10000})
-	if err != nil {
-		return nil, "", "", err
-	}
+// exportBatchSize is the page size used to stream items out, so memory stays
+// bounded no matter how many items a user owns.
+const exportBatchSize = 500
 
+func (s *reportService) ExportInfo(format string) (string, string) {
+	stamp := time.Now().Format("20060102_150405")
 	if format == "json" {
-		data, err := json.MarshalIndent(items, "", "  ")
-		if err != nil {
-			return nil, "", "", err
-		}
-		filename := fmt.Sprintf("inventory_report_%s.json", time.Now().Format("20060102_150405"))
-		return data, "application/json", filename, nil
+		return "application/json", fmt.Sprintf("inventory_report_%s.json", stamp)
 	}
+	return "text/csv", fmt.Sprintf("inventory_report_%s.csv", stamp)
+}
 
-	// Default to CSV
-	buf := new(bytes.Buffer)
-	writer := csv.NewWriter(buf)
+// forEachItemBatch walks every item of the user page by page.
+func (s *reportService) forEachItemBatch(userID uuid.UUID, fn func([]models.Item) error) error {
+	for page := 1; ; page++ {
+		items, _, err := s.itemRepo.List(userID, repository.ItemFilter{Page: page, Limit: exportBatchSize})
+		if err != nil {
+			return err
+		}
+		if len(items) > 0 {
+			if err := fn(items); err != nil {
+				return err
+			}
+		}
+		if len(items) < exportBatchSize {
+			return nil
+		}
+	}
+}
 
-	// CSV Header
+// csvSafe neutralizes spreadsheet formula injection for user-controlled text.
+func csvSafe(v string) string {
+	if v != "" && strings.ContainsRune("=+-@\t\r", rune(v[0])) {
+		return "'" + v
+	}
+	return v
+}
+
+func (s *reportService) ExportItems(userID uuid.UUID, format string, w io.Writer) error {
+	if format == "json" {
+		return s.exportJSON(userID, w)
+	}
+	return s.exportCSV(userID, w)
+}
+
+func (s *reportService) exportJSON(userID uuid.UUID, w io.Writer) error {
+	if _, err := io.WriteString(w, "["); err != nil {
+		return err
+	}
+	first := true
+	err := s.forEachItemBatch(userID, func(items []models.Item) error {
+		for _, item := range items {
+			data, err := json.MarshalIndent(item, "  ", "  ")
+			if err != nil {
+				return err
+			}
+			sep := ",\n  "
+			if first {
+				sep, first = "\n  ", false
+			}
+			if _, err := io.WriteString(w, sep); err != nil {
+				return err
+			}
+			if _, err := w.Write(data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	end := "\n]"
+	if first {
+		end = "]"
+	}
+	_, err = io.WriteString(w, end)
+	return err
+}
+
+func (s *reportService) exportCSV(userID uuid.UUID, w io.Writer) error {
+	writer := csv.NewWriter(w)
+
 	headers := []string{
 		"ID", "Name", "Category", "Quantity", "Unit", "Min Quantity",
 		"Status", "Purchase Price", "Purchase Date", "Barcode", "Serial Number",
 		"Expiry Date", "Warranty Expiry Date", "Created At",
 	}
 	if err := writer.Write(headers); err != nil {
-		return nil, "", "", err
+		return err
 	}
 
-	for _, item := range items {
-		minQty := ""
-		if item.MinQuantity != nil {
-			minQty = fmt.Sprintf("%.2f", *item.MinQuantity)
-		}
-		price := ""
-		if item.PurchasePrice != nil {
-			price = fmt.Sprintf("%.2f", *item.PurchasePrice)
-		}
-		purchaseDate := ""
-		if item.PurchaseDate != nil {
-			purchaseDate = *item.PurchaseDate
-		}
-		barcode := ""
-		if item.Barcode != nil {
-			barcode = *item.Barcode
-		}
-		serial := ""
-		if item.SerialNumber != nil {
-			serial = *item.SerialNumber
-		}
-		expiryDate := ""
-		if item.ExpiryDate != nil {
-			expiryDate = *item.ExpiryDate
-		}
-		warrantyDate := ""
-		if item.WarrantyExpiryDate != nil {
-			warrantyDate = *item.WarrantyExpiryDate
-		}
+	err := s.forEachItemBatch(userID, func(items []models.Item) error {
+		for _, item := range items {
+			minQty := ""
+			if item.MinQuantity != nil {
+				minQty = fmt.Sprintf("%.2f", *item.MinQuantity)
+			}
+			price := ""
+			if item.PurchasePrice != nil {
+				price = fmt.Sprintf("%.2f", *item.PurchasePrice)
+			}
+			purchaseDate := ""
+			if item.PurchaseDate != nil {
+				purchaseDate = *item.PurchaseDate
+			}
+			barcode := ""
+			if item.Barcode != nil {
+				barcode = *item.Barcode
+			}
+			serial := ""
+			if item.SerialNumber != nil {
+				serial = *item.SerialNumber
+			}
+			expiryDate := ""
+			if item.ExpiryDate != nil {
+				expiryDate = *item.ExpiryDate
+			}
+			warrantyDate := ""
+			if item.WarrantyExpiryDate != nil {
+				warrantyDate = *item.WarrantyExpiryDate
+			}
 
-		row := []string{
-			item.ID.String(),
-			item.Name,
-			item.CategoryID,
-			fmt.Sprintf("%.2f", item.Quantity),
-			item.Unit,
-			minQty,
-			item.Status,
-			price,
-			purchaseDate,
-			barcode,
-			serial,
-			expiryDate,
-			warrantyDate,
-			item.CreatedAt.Format(time.RFC3339),
+			row := []string{
+				item.ID.String(),
+				csvSafe(item.Name),
+				csvSafe(item.CategoryID),
+				fmt.Sprintf("%.2f", item.Quantity),
+				csvSafe(item.Unit),
+				minQty,
+				item.Status,
+				price,
+				purchaseDate,
+				csvSafe(barcode),
+				csvSafe(serial),
+				expiryDate,
+				warrantyDate,
+				item.CreatedAt.Format(time.RFC3339),
+			}
+			if err := writer.Write(row); err != nil {
+				return err
+			}
 		}
-		if err := writer.Write(row); err != nil {
-			return nil, "", "", err
-		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
-
 	writer.Flush()
-	filename := fmt.Sprintf("inventory_report_%s.csv", time.Now().Format("20060102_150405"))
-	return buf.Bytes(), "text/csv", filename, nil
+	return writer.Error()
 }

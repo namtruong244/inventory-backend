@@ -66,6 +66,7 @@ func (m *mockSettingsRepo) Update(s *models.UserSettings) error {
 func setupTestRouter() (*gin.Engine, *handler.AuthHandler) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
+		AppEnv:             "test",
 		JWTSecret:          "test-secret",
 		JWTExpirationHours: 24,
 	}
@@ -78,7 +79,6 @@ func setupTestRouter() (*gin.Engine, *handler.AuthHandler) {
 	v1 := r.Group("/api/v1/auth")
 	{
 		v1.POST("/google", authHandler.GoogleLogin)
-		v1.POST("/apple", authHandler.AppleLogin)
 	}
 	return r, authHandler
 }
@@ -90,6 +90,7 @@ func TestGoogleLoginEndpoint(t *testing.T) {
 		"email":      "testgoogle@gmail.com",
 		"name":       "Test Google",
 		"avatar_url": "https://example.com/avatar.jpg",
+		"id_token":   "mock_google_token",
 	}
 	raw, _ := json.Marshal(body)
 
@@ -126,22 +127,17 @@ func TestGoogleLoginEndpoint(t *testing.T) {
 	}
 }
 
-func TestAppleLoginEndpoint(t *testing.T) {
+func TestGoogleLoginEndpointRequiresIDToken(t *testing.T) {
 	r, _ := setupTestRouter()
 
-	body := map[string]interface{}{
-		"email": "appleuser@privaterelay.appleid.com",
-		"name":  "Apple User",
-	}
-	raw, _ := json.Marshal(body)
-
-	req, _ := http.NewRequest(http.MethodPost, "/api/v1/auth/apple", bytes.NewReader(raw))
+	raw, _ := json.Marshal(map[string]interface{}{"email": "victim@gmail.com", "name": "Victim"})
+	req, _ := http.NewRequest(http.MethodPost, "/api/v1/auth/google", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got: %d, body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 without id_token, got: %d, body: %s", w.Code, w.Body.String())
 	}
 }

@@ -138,7 +138,7 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 	}
 	offset := (page - 1) * limit
 
-	err := query.Order("created_at DESC").Limit(limit).Offset(offset).Find(&items).Error
+	err := query.Order("created_at DESC, id").Limit(limit).Offset(offset).Find(&items).Error
 	if err != nil {
 		return nil, 0, err
 	}

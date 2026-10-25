@@ -40,19 +40,6 @@ func NewLendingService(lendingRepo repository.LendingRepository, itemRepo reposi
 }
 
 func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*models.LendingRecord, error) {
-	item, err := s.itemRepo.GetByID(req.ItemID, userID)
-	if err != nil || item == nil {
-		return nil, errors.New("item not found")
-	}
-
-	// Business Rule 3: Lending Integrity
-	if item.Status == "lent" {
-		return nil, errors.New("item is already currently lent out")
-	}
-	if item.Status == "broken" || item.Status == "disposed" {
-		return nil, errors.New("cannot lend an item with status broken or disposed")
-	}
-
 	lentDate := time.Now().UTC()
 	if req.LentDate != nil {
 		lentDate = *req.LentDate
@@ -68,13 +55,9 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 		Notes:              req.Notes,
 	}
 
-	if err := s.lendingRepo.Create(record); err != nil {
-		return nil, err
-	}
-
-	// Update item status to 'lent'
-	item.Status = "lent"
-	if err := s.itemRepo.Update(item); err != nil {
+	// Business Rule 3: Lending Integrity — checked and applied atomically in the repository
+	item, err := s.lendingRepo.LendItem(userID, record)
+	if err != nil {
 		return nil, err
 	}
 
@@ -87,29 +70,7 @@ func (s *lendingService) LendItem(userID uuid.UUID, req LendItemRequest) (*model
 }
 
 func (s *lendingService) ReturnItem(userID uuid.UUID, recordID uuid.UUID) error {
-	record, err := s.lendingRepo.GetByID(recordID, userID)
-	if err != nil || record == nil {
-		return errors.New("lending record not found")
-	}
-
-	if record.ActualReturnDate != nil {
-		return errors.New("item has already been returned")
-	}
-
-	now := time.Now().UTC()
-	record.ActualReturnDate = &now
-	if err := s.lendingRepo.Update(record); err != nil {
-		return err
-	}
-
-	// Update item status back to 'stored'
-	item, err := s.itemRepo.GetByID(record.ItemID, userID)
-	if err == nil && item != nil {
-		item.Status = "stored"
-		_ = s.itemRepo.Update(item)
-	}
-
-	return nil
+	return s.lendingRepo.ReturnLoan(userID, recordID)
 }
 
 func (s *lendingService) GetActiveLoans(userID uuid.UUID) ([]models.LendingRecord, error) {

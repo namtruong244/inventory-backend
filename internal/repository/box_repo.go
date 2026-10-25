@@ -17,10 +17,10 @@ type BoxRepository interface {
 	ListAll(userID uuid.UUID) ([]models.Box, error)
 	Update(box *models.Box) error
 	Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error
-	CountItemsInBox(boxID uuid.UUID) (int64, error)
-	CountSubBoxesInBox(boxID uuid.UUID) (int64, error)
+	CountItemsInBox(boxID, userID uuid.UUID) (int64, error)
+	CountSubBoxesInBox(boxID, userID uuid.UUID) (int64, error)
 	GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]models.BreadcrumbItem, error)
-	IsDescendant(boxID, potentialDescendantID uuid.UUID) (bool, error)
+	IsDescendant(boxID, potentialDescendantID, userID uuid.UUID) (bool, error)
 }
 
 type boxRepo struct {
@@ -79,24 +79,29 @@ func (r *boxRepo) Update(box *models.Box) error {
 	return r.db.Save(box).Error
 }
 
-func (r *boxRepo) CountItemsInBox(boxID uuid.UUID) (int64, error) {
+func (r *boxRepo) CountItemsInBox(boxID, userID uuid.UUID) (int64, error) {
 	var count int64
-	err := r.db.Model(&models.Item{}).Where("box_id = ?", boxID).Count(&count).Error
+	err := r.db.Model(&models.Item{}).Where("box_id = ? AND user_id = ?", boxID, userID).Count(&count).Error
 	return count, err
 }
 
-func (r *boxRepo) CountSubBoxesInBox(boxID uuid.UUID) (int64, error) {
+func (r *boxRepo) CountSubBoxesInBox(boxID, userID uuid.UUID) (int64, error) {
 	var count int64
-	err := r.db.Model(&models.Box{}).Where("parent_id = ?", boxID).Count(&count).Error
+	err := r.db.Model(&models.Box{}).Where("parent_id = ? AND user_id = ?", boxID, userID).Count(&count).Error
 	return count, err
 }
 
 func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
-	itemCount, err := r.CountItemsInBox(id)
+	// Ownership must be verified first: every later query is scoped to this user too.
+	if _, err := r.GetByID(id, userID); err != nil {
+		return err
+	}
+
+	itemCount, err := r.CountItemsInBox(id, userID)
 	if err != nil {
 		return err
 	}
-	subBoxCount, err := r.CountSubBoxesInBox(id)
+	subBoxCount, err := r.CountSubBoxesInBox(id, userID)
 	if err != nil {
 		return err
 	}
@@ -111,26 +116,26 @@ func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
 			var descendantIDs []uuid.UUID
 			cteQuery := `
 				WITH RECURSIVE descendants AS (
-					SELECT id FROM boxes WHERE parent_id = ?
+					SELECT id FROM boxes WHERE parent_id = ? AND user_id = ?
 					UNION ALL
-					SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id
+					SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id WHERE b.user_id = ?
 				)
 				SELECT id FROM descendants;
 			`
-			if err := tx.Raw(cteQuery, id).Scan(&descendantIDs).Error; err != nil {
+			if err := tx.Raw(cteQuery, id, userID, userID).Scan(&descendantIDs).Error; err != nil {
 				return err
 			}
 
 			allBoxIDs := append(descendantIDs, id)
 
 			// Delete items in these boxes
-			if err := tx.Where("box_id IN ?", allBoxIDs).Delete(&models.Item{}).Error; err != nil {
+			if err := tx.Where("box_id IN ? AND user_id = ?", allBoxIDs, userID).Delete(&models.Item{}).Error; err != nil {
 				return err
 			}
 
 			// Delete descendant boxes
 			if len(descendantIDs) > 0 {
-				if err := tx.Where("id IN ?", descendantIDs).Delete(&models.Box{}).Error; err != nil {
+				if err := tx.Where("id IN ? AND user_id = ?", descendantIDs, userID).Delete(&models.Box{}).Error; err != nil {
 					return err
 				}
 			}
@@ -159,16 +164,16 @@ func (r *boxRepo) GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]models.Br
 	return breadcrumbs, err
 }
 
-func (r *boxRepo) IsDescendant(boxID, potentialDescendantID uuid.UUID) (bool, error) {
+func (r *boxRepo) IsDescendant(boxID, potentialDescendantID, userID uuid.UUID) (bool, error) {
 	var count int64
 	cteQuery := `
 		WITH RECURSIVE descendants AS (
-			SELECT id FROM boxes WHERE parent_id = ?
+			SELECT id FROM boxes WHERE parent_id = ? AND user_id = ?
 			UNION ALL
-			SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id
+			SELECT b.id FROM boxes b JOIN descendants d ON b.parent_id = d.id WHERE b.user_id = ?
 		)
 		SELECT COUNT(*) FROM descendants WHERE id = ?;
 	`
-	err := r.db.Raw(cteQuery, boxID, potentialDescendantID).Scan(&count).Error
+	err := r.db.Raw(cteQuery, boxID, userID, userID, potentialDescendantID).Scan(&count).Error
 	return count > 0, err
 }

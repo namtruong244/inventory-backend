@@ -57,7 +57,7 @@ func NewBoxService(boxRepo repository.BoxRepository, itemRepo repository.ItemRep
 
 func (s *boxService) Create(userID uuid.UUID, req CreateBoxRequest) (*models.Box, error) {
 	// Verify label uniqueness
-	existing, _ := s.boxRepo.GetByLabel(req.Label, nil)
+	existing, _ := s.boxRepo.GetByLabel(req.Label, &userID)
 	if existing != nil {
 		return nil, errors.New("a storage space or box with this label already exists")
 	}
@@ -107,8 +107,8 @@ func (s *boxService) GetByID(userID uuid.UUID, id uuid.UUID) (*BoxDetailResponse
 		subBoxes = []models.Box{}
 	}
 	for i := range subBoxes {
-		subBoxes[i].ItemCount, _ = s.getBoxItemCount(subBoxes[i].ID)
-		subBoxes[i].SubBoxCount, _ = s.getBoxSubBoxCount(subBoxes[i].ID)
+		subBoxes[i].ItemCount, _ = s.getBoxItemCount(subBoxes[i].ID, userID)
+		subBoxes[i].SubBoxCount, _ = s.getBoxSubBoxCount(subBoxes[i].ID, userID)
 	}
 
 	items, _, err := s.itemRepo.List(userID, repository.ItemFilter{
@@ -156,8 +156,8 @@ func (s *boxService) List(userID uuid.UUID, parentIDParam string, tree bool) (in
 	}
 
 	for i := range boxes {
-		boxes[i].ItemCount, _ = s.getBoxItemCount(boxes[i].ID)
-		boxes[i].SubBoxCount, _ = s.getBoxSubBoxCount(boxes[i].ID)
+		boxes[i].ItemCount, _ = s.getBoxItemCount(boxes[i].ID, userID)
+		boxes[i].SubBoxCount, _ = s.getBoxSubBoxCount(boxes[i].ID, userID)
 	}
 
 	return boxes, nil
@@ -172,8 +172,8 @@ func (s *boxService) getBoxTree(userID uuid.UUID) ([]*models.Box, error) {
 	boxMap := make(map[uuid.UUID]*models.Box)
 	for i := range allBoxes {
 		b := allBoxes[i]
-		b.ItemCount, _ = s.getBoxItemCount(b.ID)
-		b.SubBoxCount, _ = s.getBoxSubBoxCount(b.ID)
+		b.ItemCount, _ = s.getBoxItemCount(b.ID, userID)
+		b.SubBoxCount, _ = s.getBoxSubBoxCount(b.ID, userID)
 		b.Children = make([]*models.Box, 0)
 		boxMap[b.ID] = &b
 	}
@@ -215,7 +215,7 @@ func (s *boxService) Update(userID uuid.UUID, id uuid.UUID, req UpdateBoxRequest
 		box.Icon = req.Icon
 	}
 	if req.Label != nil && *req.Label != box.Label {
-		existing, _ := s.boxRepo.GetByLabel(*req.Label, nil)
+		existing, _ := s.boxRepo.GetByLabel(*req.Label, &userID)
 		if existing != nil && existing.ID != box.ID {
 			return nil, errors.New("label is already taken by another box")
 		}
@@ -248,7 +248,7 @@ func (s *boxService) Move(userID uuid.UUID, id uuid.UUID, newParentID *uuid.UUID
 		}
 
 		// Check if new parent is a descendant of current box
-		isDesc, err := s.boxRepo.IsDescendant(box.ID, *newParentID)
+		isDesc, err := s.boxRepo.IsDescendant(box.ID, *newParentID, userID)
 		if err != nil {
 			return err
 		}
@@ -265,12 +265,12 @@ func (s *boxService) Delete(userID uuid.UUID, id uuid.UUID, cascade bool) error 
 	return s.boxRepo.Delete(id, userID, cascade)
 }
 
-func (s *boxService) getBoxItemCount(boxID uuid.UUID) (int, error) {
-	c, err := s.boxRepo.CountItemsInBox(boxID)
+func (s *boxService) getBoxItemCount(boxID, userID uuid.UUID) (int, error) {
+	c, err := s.boxRepo.CountItemsInBox(boxID, userID)
 	return int(c), err
 }
 
-func (s *boxService) getBoxSubBoxCount(boxID uuid.UUID) (int, error) {
-	c, err := s.boxRepo.CountSubBoxesInBox(boxID)
+func (s *boxService) getBoxSubBoxCount(boxID, userID uuid.UUID) (int, error) {
+	c, err := s.boxRepo.CountSubBoxesInBox(boxID, userID)
 	return int(c), err
 }

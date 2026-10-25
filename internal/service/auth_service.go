@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"inventory_backend/internal/config"
 	"inventory_backend/internal/models"
@@ -19,7 +21,6 @@ type AuthService interface {
 	Register(name, email, password string) (*AuthResult, error)
 	Login(email, password string) (*AuthResult, error)
 	LoginWithGoogle(email, name string, avatarURL *string, idToken *string) (*AuthResult, error)
-	LoginWithApple(email, name string, identityToken *string) (*AuthResult, error)
 	GetProfile(userID uuid.UUID) (*models.User, error)
 }
 
@@ -138,6 +139,10 @@ func (s *authService) Login(email, password string) (*AuthResult, error) {
 	}, nil
 }
 
+const googleVerifyTimeout = 5 * time.Second
+
+var googleHTTPClient = &http.Client{Timeout: googleVerifyTimeout}
+
 type GoogleTokenInfo struct {
 	Aud           string `json:"aud"`
 	Azp           string `json:"azp"`
@@ -147,14 +152,24 @@ type GoogleTokenInfo struct {
 	Picture       string `json:"picture"`
 }
 
+// isEmailVerified handles tokeninfo returning email_verified as either bool or string.
+func (g *GoogleTokenInfo) isEmailVerified() bool {
+	switch v := g.EmailVerified.(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true"
+	}
+	return false
+}
+
 func verifyGoogleToken(idToken, expectedClientID string) (*GoogleTokenInfo, error) {
-	// Bypass verification for mock tokens in test/dev
-	if strings.HasPrefix(idToken, "mock_") {
-		return nil, nil
+	if expectedClientID == "" {
+		return nil, errors.New("google login is not configured")
 	}
 
-	url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", idToken)
-	resp, err := http.Get(url)
+	endpoint := "https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(idToken)
+	resp, err := googleHTTPClient.Get(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to verify google token: %w", err)
 	}
@@ -169,31 +184,38 @@ func verifyGoogleToken(idToken, expectedClientID string) (*GoogleTokenInfo, erro
 		return nil, err
 	}
 
-	// Verify audience matches expected Client ID
-	if expectedClientID != "" && info.Aud != expectedClientID && info.Azp != expectedClientID {
+	if info.Aud != expectedClientID && info.Azp != expectedClientID {
 		return nil, errors.New("google token audience mismatch")
+	}
+	if info.Email == "" || !info.isEmailVerified() {
+		return nil, errors.New("google account email is not verified")
 	}
 
 	return &info, nil
 }
 
+// LoginWithGoogle authenticates strictly by the Google id token: the email in the
+// request body is never trusted. Tokens prefixed "mock_" are accepted only when APP_ENV=test.
 func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idToken *string) (*AuthResult, error) {
-	// Verify idToken with Google if provided
-	if idToken != nil && *idToken != "" && !strings.HasPrefix(*idToken, "mock_") {
+	if idToken == nil || *idToken == "" {
+		return nil, errors.New("id_token is required")
+	}
+
+	if strings.HasPrefix(*idToken, "mock_") {
+		if s.cfg.AppEnv != "test" {
+			return nil, errors.New("invalid Google token")
+		}
+	} else {
 		info, err := verifyGoogleToken(*idToken, s.cfg.GoogleClientID)
 		if err != nil {
 			return nil, fmt.Errorf("google authentication failed: %w", err)
 		}
-		if info != nil {
-			if info.Email != "" {
-				email = info.Email
-			}
-			if info.Name != "" && (name == "" || name == "Google User") {
-				name = info.Name
-			}
-			if info.Picture != "" && (avatarURL == nil || *avatarURL == "") {
-				avatarURL = &info.Picture
-			}
+		email = info.Email
+		if info.Name != "" && (name == "" || name == "Google User") {
+			name = info.Name
+		}
+		if info.Picture != "" && (avatarURL == nil || *avatarURL == "") {
+			avatarURL = &info.Picture
 		}
 	}
 
@@ -225,67 +247,6 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 			Provider:     "google",
 			Role:         "Owner",
 			AvatarURL:    avatarURL,
-			PasswordHash: nil,
-		}
-		if err := s.userRepo.Create(user); err != nil {
-			return nil, err
-		}
-
-		_ = s.settingsRepo.Create(&models.UserSettings{
-			UserID:            user.ID,
-			CurrencySymbol:    "$",
-			DefaultUnit:       "pcs",
-			ExpiryWarningDays: 30,
-			NotifyExpiring:    true,
-			NotifyOverdue:     true,
-			NotifyLowStock:    true,
-			VibrateOnScan:     true,
-			AutoOpenOnScan:    true,
-		})
-	}
-
-	token, err := utils.GenerateToken(user.ID, user.Email, user.Role, s.cfg.JWTSecret, s.cfg.JWTExpirationHours)
-	if err != nil {
-		return nil, err
-	}
-
-	return &AuthResult{
-		Token: token,
-		User: UserResponse{
-			ID:        user.ID,
-			Name:      user.Name,
-			Email:     user.Email,
-			Role:      user.Role,
-			AvatarURL: user.AvatarURL,
-			Provider:  user.Provider,
-		},
-	}, nil
-}
-
-func (s *authService) LoginWithApple(email, name string, identityToken *string) (*AuthResult, error) {
-	if email == "" {
-		return nil, errors.New("email is required")
-	}
-	if name == "" {
-		name = "Apple User"
-	}
-
-	user, _ := s.userRepo.GetByEmail(email)
-	if user != nil {
-		user.Provider = "apple"
-		// Do not overwrite existing real name with default "Apple User"
-		if (user.Name == "" || user.Name == "Apple User") && name != "Apple User" {
-			user.Name = name
-		}
-		if err := s.userRepo.Update(user); err != nil {
-			return nil, err
-		}
-	} else {
-		user = &models.User{
-			Name:         name,
-			Email:        email,
-			Provider:     "apple",
-			Role:         "Owner",
 			PasswordHash: nil,
 		}
 		if err := s.userRepo.Create(user); err != nil {

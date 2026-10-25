@@ -7,7 +7,7 @@ Tài liệu này đặc tả toàn bộ nghiệp vụ, cơ sở dữ liệu (Dat
 ## 1. Tổng quan hệ thống (System Overview)
 
 Hệ thống quản lý kho & tài sản cá nhân / doanh nghiệp nhỏ bao gồm các phân hệ chính:
-1. **Xác thực tài khoản & Mạng xã hội (Authentication & Social Login):** Đăng ký/đăng nhập truyền thống qua Email/Password, hỗ trợ đăng nhập nhanh bằng Google (Gmail) và Apple ID.
+1. **Xác thực tài khoản & Mạng xã hội (Authentication & Social Login):** Đăng ký/đăng nhập truyền thống qua Email/Password, hỗ trợ đăng nhập nhanh bằng Google (Gmail).
 2. **Quản lý hồ sơ & Cài đặt (Profile & User Settings):** Cập nhật tên, chức vụ/vai trò (role), ảnh đại diện (avatar), cấu hình tiền tệ, đơn vị tính mặc định, và các tùy chọn bật/tắt cảnh báo.
 3. **Quản lý phân cấp không gian lưu trữ (Multi-level Storage Hierarchy / Boxes):** Cấu trúc cây đa cấp linh hoạt (Room → Cabinet → Shelf → Box → Drawer). Hỗ trợ điều chuyển vị trí cha (move box) với cơ chế kiểm tra chống lặp vòng (Cycle Prevention).
 4. **Quản lý danh mục & Thuộc tính động (Item Catalog, Specifications & Custom Attributes):** Theo dõi số lượng, đơn vị, giá trị, hình ảnh, hóa đơn, hạn sử dụng (perishables), bảo hành (warranties), kèm bảng thông số kỹ thuật động (Color, RAM, Storage, Dimension...) dạng key-value.
@@ -66,16 +66,16 @@ Hệ thống quản lý kho & tài sản cá nhân / doanh nghiệp nhỏ bao g�
 ### 3.1. Chi tiết các bảng dữ liệu
 
 #### 3.1.1. Bảng `users` (Tài khoản người dùng)
-Hỗ trợ đăng nhập chuẩn (Email/Password) và Đăng nhập mạng xã hội (Google, Apple).
+Hỗ trợ đăng nhập chuẩn (Email/Password) và Đăng nhập mạng xã hội (Google).
 
 | Trường | Kiểu dữ liệu | Ràng buộc | Diễn giải |
 | :--- | :--- | :--- | :--- |
 | `id` | UUID | PK, default uuid_generate_v4() | Khóa chính |
 | `name` | VARCHAR(150) | NOT NULL | Tên người dùng |
 | `email` | VARCHAR(255) | UNIQUE, NOT NULL | Email đăng nhập |
-| `password_hash` | VARCHAR(255) | NULL | Mật khẩu hash (Cho phép NULL nếu đăng nhập qua Google / Apple) |
-| `provider` | VARCHAR(50) | DEFAULT 'local' | Nhà cung cấp auth (`local`, `google`, `apple`, `guest`) |
-| `provider_id` | VARCHAR(255) | NULL | Mã định danh Google Sub hoặc Apple User ID |
+| `password_hash` | VARCHAR(255) | NULL | Mật khẩu hash (Cho phép NULL nếu đăng nhập qua Google) |
+| `provider` | VARCHAR(50) | DEFAULT 'local' | Nhà cung cấp auth (`local`, `google`, `guest`) |
+| `provider_id` | VARCHAR(255) | NULL | Mã định danh Google Sub |
 | `role` | VARCHAR(50) | DEFAULT 'Owner' | Vai trò (`Owner`, `Manager`, `Staff`) |
 | `avatar_url` | TEXT | NULL | Đường dẫn ảnh đại diện |
 | `created_at` | TIMESTAMPTZ | DEFAULT NOW() | Thời điểm tạo |
@@ -184,9 +184,9 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name VARCHAR(150) NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NULL, -- Cho phép NULL nếu đăng nhập qua Google / Apple
-    provider VARCHAR(50) DEFAULT 'local', -- 'local', 'google', 'apple', 'guest'
-    provider_id VARCHAR(255) NULL,       -- Google Sub hoặc Apple User ID
+    password_hash VARCHAR(255) NULL, -- Cho phép NULL nếu đăng nhập qua Google
+    provider VARCHAR(50) DEFAULT 'local', -- 'local', 'google', 'guest'
+    provider_id VARCHAR(255) NULL,       -- Google Sub
     role VARCHAR(50) DEFAULT 'Owner',
     avatar_url TEXT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -350,10 +350,12 @@ CREATE INDEX IF NOT EXISTS idx_lending_active ON lending_records(user_id, actual
   {
     "email": "sara.wilson@gmail.com",
     "name": "Sara Wilson",
-    "avatar_url": "https://lh3.googleusercontent.com/a/default-user=s96-c"
+    "avatar_url": "https://lh3.googleusercontent.com/a/default-user=s96-c",
+    "id_token": "<Google ID token — bắt buộc>"
   }
   ```
 - **Nghiệp vụ xử lý Backend:**
+  0. Bắt buộc có `id_token`; verify với Google (`aud`/`azp` khớp `GOOGLE_CLIENT_ID`, `email_verified = true`). Email lấy từ token, không dùng email trong body. Thiếu/không hợp lệ → 400 `AUTH_FAILED`.
   1. Kiểm tra trong bảng `users` theo `email`.
   2. Nếu người dùng đã tồn tại: Cập nhật `name`, `avatar_url` (nếu có), lưu `provider = 'google'`.
   3. Nếu chưa tồn tại: Tạo mới người dùng với `role = 'Owner'`, `provider = 'google'`, `password_hash = NULL`.
@@ -374,39 +376,6 @@ CREATE INDEX IF NOT EXISTS idx_lending_active ON lending_records(user_id, actual
       }
     },
     "message": "Google authentication successful"
-  }
-  ```
-
-#### `POST /api/v1/auth/apple`
-Đăng nhập hoặc đăng ký bằng tài khoản Apple ID (hỗ trợ cả Apple Private Relay email).
-- **Yêu cầu xác thực:** Không (Public).
-- **Request Body:**
-  ```json
-  {
-    "email": "sara.w92@privaterelay.appleid.com",
-    "name": "Sara Wilson"
-  }
-  ```
-- **Nghiệp vụ xử lý Backend:**
-  1. Kiểm tra email trong hệ thống.
-  2. Tạo mới hoặc đăng nhập tài khoản với `provider = 'apple'`, `role = 'Owner'`, `password_hash = NULL`.
-  3. Khởi tạo cấu hình và danh mục mặc định nếu tạo mới.
-  4. Cấp phát JWT Bearer Token.
-- **Response 200 OK:**
-  ```json
-  {
-    "success": true,
-    "data": {
-      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-      "user": {
-        "id": "b3f812d4-1192-491a-b620-8321287fc909",
-        "name": "Sara Wilson",
-        "email": "sara.w92@privaterelay.appleid.com",
-        "role": "Owner",
-        "avatarUrl": null
-      }
-    },
-    "message": "Apple authentication successful"
   }
   ```
 
@@ -643,7 +612,7 @@ Tìm kiếm và lọc danh sách tài sản trong kho.
   - `isExpired`: `true` để lấy các món đã hết hạn sử dụng.
   - `isExpiring`: `true` để lấy các món sắp hết hạn trong N ngày.
   - `page`: Số trang (mặc định 1).
-  - `limit`: Số item trên mỗi trang (mặc định 20).
+  - `limit`: Số item trên mỗi trang (mặc định 20, tối đa 200 — giá trị lớn hơn bị cắt về 200).
 - **Response 200 OK:**
   ```json
   {
@@ -924,7 +893,7 @@ Cung cấp dữ liệu phân tích sức khỏe kho tài sản:
   ```
 
 #### `GET /api/v1/reports/export`
-Xuất file báo cáo kiểm kê tài sản (định dạng CSV / JSON / PDF) để sao lưu hoặc kiểm kê định kỳ.
+Xuất file báo cáo kiểm kê tài sản (query `format=csv|json`, mặc định csv) để sao lưu hoặc kiểm kê định kỳ. Dữ liệu được stream theo lô 500 item (không giới hạn tổng số); CSV vô hiệu hóa công thức (`=`, `+`, `-`, `@` ở đầu ô được thêm `'`). Lỗi giữa chừng sẽ cắt ngắn file (đã gửi header).
 
 ---
 
@@ -965,11 +934,11 @@ Tải lên ảnh chụp thực tế đồ đạc hoặc ảnh hóa đơn mua hà
    - Khi trả đồ, trạng thái phải được trả lại là `stored` hoặc `inUse` và cập nhật `actual_return_date = NOW()`.
 
 4. **Định danh mã vạch & QR Code:**
-   - Trường `label` của bảng `boxes` là duy nhất trên phạm vi toàn hệ thống hoặc người dùng để in tem QR dán lên hộp đựng.
+   - Trường `label` của bảng `boxes` là duy nhất **trong phạm vi từng người dùng** (unique index `(user_id, label)`) để in tem QR dán lên hộp đựng.
    - Trường `barcode` của `items` hỗ trợ các định dạng mã vạch thương mại chuẩn (UPC-A, EAN-13, Code 128).
 
 5. **Xử lý Đăng nhập Mạng xã hội (Social Login Handling):**
-   - Nếu email đăng nhập từ Google/Apple đã tồn tại trong cơ sở dữ liệu: Liên kết tài khoản bằng cách cập nhật `provider` tương ứng, cập nhật `avatar_url` (nếu có).
+   - Nếu email đăng nhập từ Google đã tồn tại trong cơ sở dữ liệu: Liên kết tài khoản bằng cách cập nhật `provider` tương ứng, cập nhật `avatar_url` (nếu có).
    - Nếu email chưa từng đăng ký: Tự động khởi tạo bản ghi `users`, cấu hình `user_settings` mặc định, và tạo các danh mục hệ thống `categories`.
 
 ---
@@ -1006,11 +975,6 @@ type GoogleLoginRequest struct {
 	Email     string  `json:"email" binding:"required,email"`
 	Name      string  `json:"name" binding:"required"`
 	AvatarURL *string `json:"avatar_url"`
-}
-
-type AppleLoginRequest struct {
-	Email string `json:"email" binding:"required,email"`
-	Name  string `json:"name" binding:"required"`
 }
 
 type AuthResponseData struct {

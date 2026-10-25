@@ -78,11 +78,11 @@ func (m *mockBoxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error
 	return nil
 }
 
-func (m *mockBoxRepo) CountItemsInBox(boxID uuid.UUID) (int64, error) {
+func (m *mockBoxRepo) CountItemsInBox(boxID, userID uuid.UUID) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockBoxRepo) CountSubBoxesInBox(boxID uuid.UUID) (int64, error) {
+func (m *mockBoxRepo) CountSubBoxesInBox(boxID, userID uuid.UUID) (int64, error) {
 	return 0, nil
 }
 
@@ -90,7 +90,7 @@ func (m *mockBoxRepo) GetBreadcrumbs(boxID uuid.UUID, userID uuid.UUID) ([]model
 	return []models.BreadcrumbItem{}, nil
 }
 
-func (m *mockBoxRepo) IsDescendant(boxID, potentialDescendantID uuid.UUID) (bool, error) {
+func (m *mockBoxRepo) IsDescendant(boxID, potentialDescendantID, userID uuid.UUID) (bool, error) {
 	return false, nil
 }
 
@@ -162,5 +162,22 @@ func TestBoxService_ListAndNormalizeType(t *testing.T) {
 	subBoxes := subBoxesResult.([]models.Box)
 	if len(subBoxes) != 1 || subBoxes[0].ID != container.ID {
 		t.Errorf("expected 1 subBox in room, got %d", len(subBoxes))
+	}
+}
+
+func TestBoxService_LabelUniquePerUser(t *testing.T) {
+	boxSvc := service.NewBoxService(newMockBoxRepo(), nil)
+	alice, bob := uuid.New(), uuid.New()
+
+	if _, err := boxSvc.Create(alice, service.CreateBoxRequest{Name: "A", Type: "box", Label: "LBL-1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Same user cannot reuse the label
+	if _, err := boxSvc.Create(alice, service.CreateBoxRequest{Name: "A2", Type: "box", Label: "LBL-1"}); err == nil {
+		t.Errorf("expected duplicate label error for the same user")
+	}
+	// Another user must not be blocked by (or learn about) Alice's label
+	if _, err := boxSvc.Create(bob, service.CreateBoxRequest{Name: "B", Type: "box", Label: "LBL-1"}); err != nil {
+		t.Errorf("expected different user to reuse label, got: %v", err)
 	}
 }

@@ -1,9 +1,12 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -24,6 +27,7 @@ type Config struct {
 	JWTSecret          string
 	JWTExpirationHours int
 	UploadDir          string
+	CORSAllowedOrigins []string // empty: allow all in non-production, none in production
 
 	// Storage configuration
 	StorageDriver     string // "local" or "r2"
@@ -35,7 +39,6 @@ type Config struct {
 
 	// OAuth & Social Auth
 	GoogleClientID string
-	AppleClientID  string
 }
 
 func LoadConfig() *Config {
@@ -61,7 +64,7 @@ func LoadConfig() *Config {
 
 	runMigrations := getEnvAsBool("RUN_MIGRATIONS", true)
 
-	return &Config{
+	cfg := &Config{
 		Port:               getEnv("PORT", "8080"),
 		AppEnv:             getEnv("APP_ENV", "development"),
 		BaseURL:            getEnv("BASE_URL", "http://localhost:8080"),
@@ -74,9 +77,10 @@ func LoadConfig() *Config {
 		DBMaxOpenConns:     dbMaxOpenConns,
 		DBMaxIdleConns:     dbMaxIdleConns,
 		RunMigrations:      runMigrations,
-		JWTSecret:          getEnv("JWT_SECRET", "default_secret_inventory_system_key"),
+		JWTSecret:          getEnv("JWT_SECRET", insecureDefaultJWTSecret),
 		JWTExpirationHours: jwtExpHours,
 		UploadDir:          getEnv("UPLOAD_DIR", "./uploads"),
+		CORSAllowedOrigins: splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "")),
 		StorageDriver:      getEnv("STORAGE_DRIVER", "local"),
 		R2AccountID:        getEnv("R2_ACCOUNT_ID", ""),
 		R2AccessKeyID:      getEnv("R2_ACCESS_KEY_ID", ""),
@@ -84,8 +88,41 @@ func LoadConfig() *Config {
 		R2BucketName:       getEnv("R2_BUCKET_NAME", ""),
 		R2PublicURL:        getEnv("R2_PUBLIC_URL", ""),
 		GoogleClientID:     getEnv("GOOGLE_CLIENT_ID", "1059613381730-sbh1t9581ud40drbiu8ssh7fj1e3ahev.apps.googleusercontent.com"),
-		AppleClientID:      getEnv("APPLE_CLIENT_ID", "com.namtruong244.inventory"),
 	}
+
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Fatal: invalid configuration: %v", err)
+	}
+	return cfg
+}
+
+const (
+	insecureDefaultJWTSecret = "default_secret_inventory_system_key"
+	minProductionJWTSecret   = 32
+)
+
+// Validate rejects configurations that are unsafe to run in production.
+func (c *Config) Validate() error {
+	if c.AppEnv != "production" {
+		return nil
+	}
+	if c.JWTSecret == insecureDefaultJWTSecret || strings.Contains(c.JWTSecret, "change_in_production") {
+		return errors.New("JWT_SECRET must be set to a unique secret in production")
+	}
+	if len(c.JWTSecret) < minProductionJWTSecret {
+		return fmt.Errorf("JWT_SECRET must be at least %d characters in production", minProductionJWTSecret)
+	}
+	return nil
+}
+
+func splitCSV(val string) []string {
+	var out []string
+	for _, part := range strings.Split(val, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func getEnv(key, defaultVal string) string {
