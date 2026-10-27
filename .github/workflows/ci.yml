@@ -11,6 +11,20 @@ jobs:
   check:
     name: Vet, format & test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: inventory_it
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d inventory_it"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -25,5 +39,12 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      - name: Unit tests
+      - name: Unit & integration tests
+        env:
+          # Setting INTEGRATION_DB_NAME turns on the PostgreSQL tests in internal/app.
+          INTEGRATION_DB_NAME: inventory_it
+          INTEGRATION_RUN: ${{ github.run_id }}
+          DB_HOST: localhost
+          DB_USER: postgres
+          DB_PASSWORD: postgres
         run: go test ./...
