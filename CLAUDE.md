@@ -58,9 +58,13 @@ internal/utils/        JWT, bcrypt password
 - Item status có thêm `lost` (không cho mượn, không tính vào tổng giá trị). Settings có `warrantyWarningDays` và `timezone` (IANA); "hôm nay" tính bằng `utils.TodayIn(tz)`.
 - `categoryId` của item lưu **tên** danh mục; `ItemService` kiểm tra qua `CategoryRepository.Resolve`, xoá danh mục đang dùng trả 409.
 - `stock_movements` ghi lịch sử số lượng (best-effort, không làm hỏng thao tác chính); `GET /items/:id/movements`.
-- Index trigram (`pg_trgm`) cho tìm kiếm tên/mô tả là best-effort: thiếu extension chỉ log cảnh báo.
+- Tìm kiếm tên/mô tả (`GET /items?q=`) bỏ dấu tiếng Việt bằng hàm SQL `f_unaccent_vi(text)` (`IMMUTABLE`, dựa trên `translate`, tạo trong `postgres.go`; không cần extension `unaccent`). Bảng ký tự phải giữ khớp với `normalizeVi` ở `FE_Flutter/lib/utils/text_normalize.dart`. Index trigram (`pg_trgm`) trên tên/mô tả và trên `f_unaccent_vi(...)` là best-effort: thiếu extension chỉ log cảnh báo, tìm kiếm vẫn chạy.
+- `PATCH /items/:id/quantity` với `delta` nhận `idempotencyKey` (≤ 64 ký tự): lưu trong `stock_movements.idempotency_key` (unique theo user, partial index `uq_movements_idempotency`); gửi lại cùng key thì không cộng lần hai (FE gắn key vào op offline). `GET /lending/history` không có `itemId` trả các khoản đã trả của mọi item, có phân trang.
 - Lambda dựng DB một lần mỗi cold start (`init()` trong `cmd/lambda/main.go`), không mở lại mỗi request.
-- Upload (`/media/upload`): tối đa 10 MB, nội dung file được sniff và phải khớp đuôi file.
+- Upload (`/media/upload`): tối đa 10 MB, nội dung file được sniff và phải khớp đuôi file; lưu vào `<folder>/<userID>/<uuid>.<ext>` (`storage.UserFolder`), giới hạn 60 lượt / user / 10 phút. `storage.OwnerOf(url)` đọc chủ file từ URL: `ItemService` từ chối `photos`/`receiptPhotos` trỏ vào thư mục của user khác (trừ URL đã có sẵn trên item; link ngoài và file cũ không có thư mục user không bị kiểm tra), và xoá tài khoản / dọn thùng rác bỏ qua file của người khác. Lỗi upload không phải `apperr` chỉ được log, client nhận 500 chung.
+- `gin` mặc định tin mọi `X-Forwarded-For` nên `SetupRouter` gọi `SetTrustedProxies(cfg.TrustedProxies)` (env `TRUSTED_PROXIES`, mặc định rỗng): IP client = địa chỉ kết nối; trên Lambda adapter gán nó bằng source IP của API Gateway. Nếu đặt thêm CloudFront/proxy phía trước API Gateway thì IP đó sẽ thành IP client và rate limit gộp chung — khi đó cần thêm cấu hình tương ứng.
+- Trên Lambda (`AWS_LAMBDA_FUNCTION_NAME` có giá trị), `config.Validate()` bắt buộc đặt **cả `APP_ENV` lẫn `JWT_SECRET`** (secret mạnh ≥ 32 ký tự, không phải giá trị mặc định); thiếu thì `log.Fatalf` lúc cold start thay vì chạy với cấu hình dev.
+- `UserRepository.Update` chỉ ghi các cột hồ sơ/đăng nhập và **không** ghi `token_version` (đổi qua `BumpTokenVersion`, nguyên tử), để một lần sửa hồ sơ đọc-rồi-ghi không hồi sinh token đã bị thu hồi. `role` vẫn là nhãn tự do do client sửa được qua `PATCH /user/profile`, chưa được dùng để phân quyền.
 
 ## Auth
 
@@ -80,6 +84,6 @@ internal/utils/        JWT, bcrypt password
 
 ## Deploy
 
-- `.github/workflows/ci.yml`: PR/branch khác main chạy gofmt, vet, test.
-- `.github/workflows/deploy.yml`: push `main`/`master` → `go test` → build `cmd/lambda` → `aws lambda update-function-code`. Đừng push khi chưa được yêu cầu.
+- `.github/workflows/ci.yml`: PR/branch khác main chạy gofmt, vet, test; job có service `postgres:16-alpine` và đặt `INTEGRATION_DB_NAME` nên cả test tích hợp trong `internal/app` cũng chạy.
+- `.github/workflows/deploy.yml`: push `main`/`master` → `go test` (cũng kèm Postgres + test tích hợp) → build `cmd/lambda` → `aws lambda update-function-code`. Đừng push khi chưa được yêu cầu.
 - Lambda: giữ `DB_MAX_OPEN_CONNS` thấp (2–5); storage nên là `r2` vì filesystem Lambda không bền.

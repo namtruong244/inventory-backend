@@ -635,7 +635,7 @@ Xóa thùng chứa.
 #### `GET /api/v1/items`
 Tìm kiếm và lọc danh sách tài sản trong kho.
 - **Query Params:**
-  - `q`: Từ khóa tìm kiếm (tên, mô tả, barcode, serial number).
+  - `q`: Từ khóa tìm kiếm (tên, mô tả, barcode, serial number). Tên và mô tả không phân biệt hoa thường và **bỏ dấu tiếng Việt** (`ban` tìm được `Bàn`, `den` tìm được `Đèn`) nhờ hàm SQL `f_unaccent_vi`; ký tự `%` và `_` trong từ khoá được hiểu theo nghĩa đen.
   - `boxId`: Lọc theo vị trí lưu trữ.
   - `category`: Lọc theo danh mục.
   - `status`: Lọc theo trạng thái (`stored`, `inUse`, `lent`, `broken`, `disposed`).
@@ -733,6 +733,7 @@ Cập nhật nhanh số lượng tồn kho (tăng/giảm trực tiếp khi xuấ
   }
   ```
   Hoặc gửi `delta` (số có dấu, cộng vào số lượng hiện tại trong transaction có khoá hàng) thay cho `quantity`; phải có **đúng một** trong hai, nếu không 400 `INVALID_INPUT`. Kết quả âm → 400. Với `delta`, `data` là `{ "id", "quantity" }`. FE xếp hàng thay đổi offline dưới dạng `delta` để nhiều thiết bị cộng dồn được.
+  Với `delta` có thể kèm `idempotencyKey` (chuỗi ≤ 64 ký tự, duy nhất theo user): gửi lại cùng key thì không cộng lần hai (trả số lượng hiện tại), để phát lại hàng đợi offline an toàn.
   `reason` (tuỳ chọn, mặc định `adjust`): `restock | consume | damaged | lost | correction | adjust`; giá trị khác trả 400. Mỗi lần số lượng đổi ghi một dòng `stock_movements`.
 - **Response 200 OK:**
   ```json
@@ -840,7 +841,7 @@ Lấy danh sách các tài sản đang cho mượn (`actual_return_date IS NULL`
 Lấy danh sách các tài sản mượn đã quá hạn trả (`actual_return_date IS NULL` và **ngày** hẹn trả < hôm nay theo múi giờ user; khoản hẹn trả hôm nay chưa quá hạn).
 
 #### `GET /api/v1/lending/history?itemId=...`
-Lấy toàn bộ lịch sử các lần mượn trả của một món đồ.
+Lấy toàn bộ lịch sử các lần mượn trả của một món đồ. Bỏ `itemId` thì trả **mọi khoản đã trả** của người dùng, mới trả nhất trước, có phân trang (`page`, `limit` mặc định 50, tối đa 200; `meta.total`).
 
 ---
 
@@ -962,17 +963,20 @@ Tải lên ảnh chụp thực tế đồ đạc hoặc ảnh hóa đơn mua hà
 - **Content-Type:** `multipart/form-data`
 - **Body:**
   - `file`: File nhị phân (jpg, png, webp, heic).
-  - `folder`: `items` hoặc `receipts` hoặc `avatars`.
+  - `folder`: `items` hoặc `receipts` (giá trị khác được coi là `items`).
+- Tối đa 10 MB, nội dung file phải khớp đuôi file; giới hạn 60 lượt upload / người dùng / 10 phút (429 `RATE_LIMITED`).
+- File được lưu trong thư mục riêng của người upload: `<folder>/<userID>/<uuid>.<ext>`.
 - **Response 200 OK:**
   ```json
   {
     "success": true,
     "data": {
-      "url": "https://storage.inventory.local/uploads/items/img_987213.webp"
+      "url": "https://storage.inventory.local/uploads/items/3f2b…-userID/6c1e…-uuid.webp"
     },
     "message": "File uploaded successfully"
   }
   ```
+- **Quyền sở hữu ảnh:** khi tạo/sửa item, `photos` và `receiptPhotos` không được chứa URL nằm trong thư mục của người dùng khác (400 `CREATE_FAILED`/`UPDATE_FAILED`). Link ngoài và file cũ không có thư mục người dùng (upload trước khi có quy ước này) vẫn được chấp nhận; URL đã có sẵn trên item luôn được giữ. Xoá tài khoản hoặc dọn thùng rác bỏ qua file nằm trong thư mục của người khác.
 
 ---
 

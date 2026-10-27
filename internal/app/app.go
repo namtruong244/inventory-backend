@@ -82,6 +82,11 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 
 	// 5. Setup Gin Router
 	router := gin.New()
+	// Without this gin believes every X-Forwarded-For header, so a client could send a
+	// different fake address on each request and never hit the login rate limit.
+	if err := router.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, fmt.Errorf("invalid TRUSTED_PROXIES: %w", err)
+	}
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
 	router.Use(middleware.CORSMiddleware(cfg.CORSAllowedOrigins, cfg.AppEnv == "production"))
@@ -223,6 +228,8 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 
 			// Media Upload
 			mediaGroup := protected.Group("/media")
+			// 60 uploads per user per 10 minutes: files are up to 10 MB each.
+			mediaGroup.Use(middleware.NewRateLimiter(60, 10*time.Minute).PerUser())
 			{
 				mediaGroup.POST("/upload", mediaHandler.Upload)
 			}

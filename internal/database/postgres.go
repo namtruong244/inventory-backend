@@ -70,6 +70,7 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			// Performance and GIN indexes
 			"CREATE INDEX IF NOT EXISTS idx_boxes_user_parent ON boxes(user_id, parent_id);",
 			"CREATE INDEX IF NOT EXISTS idx_boxes_label ON boxes(label);",
+			unaccentFunctionSQL,
 			"CREATE INDEX IF NOT EXISTS idx_items_user_box ON items(user_id, box_id);",
 			"CREATE INDEX IF NOT EXISTS idx_items_barcode ON items(barcode);",
 			"CREATE INDEX IF NOT EXISTS idx_items_serial ON items(serial_number);",
@@ -91,6 +92,9 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			// Only whole-item loans are exclusive; partial loans may overlap.
 			"CREATE UNIQUE INDEX IF NOT EXISTS uq_lending_open_whole ON lending_records(item_id) WHERE actual_return_date IS NULL AND is_partial = false;",
 
+			// A replayed quantity change (same client key) must not be applied twice.
+			"CREATE UNIQUE INDEX IF NOT EXISTS uq_movements_idempotency ON stock_movements(user_id, idempotency_key) WHERE idempotency_key <> '';",
+
 			// Referential integrity: no orphaned items, sub-boxes or loans
 			addForeignKey("fk_items_box", "items", "box_id", "boxes", "NO ACTION"),
 			addForeignKey("fk_boxes_parent", "boxes", "parent_id", "boxes", "NO ACTION"),
@@ -108,6 +112,8 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 			"CREATE EXTENSION IF NOT EXISTS pg_trgm;",
 			"CREATE INDEX IF NOT EXISTS idx_items_name_trgm ON items USING gin (name gin_trgm_ops);",
 			"CREATE INDEX IF NOT EXISTS idx_items_description_trgm ON items USING gin (description gin_trgm_ops);",
+			"CREATE INDEX IF NOT EXISTS idx_items_name_unaccent_trgm ON items USING gin (f_unaccent_vi(name) gin_trgm_ops);",
+			"CREATE INDEX IF NOT EXISTS idx_items_description_unaccent_trgm ON items USING gin (f_unaccent_vi(description) gin_trgm_ops);",
 		} {
 			if err := db.Exec(stmt).Error; err != nil {
 				log.Printf("Warning: optional search index skipped (%.50s...): %v\n", stmt, err)
@@ -162,3 +168,12 @@ func addForeignKey(name, table, column, refTable, onDelete string) string {
 		END IF;
 	END $$;`, name, table, name, column, refTable, onDelete)
 }
+
+// unaccentFunctionSQL defines f_unaccent_vi(text): lower-case with Vietnamese diacritics
+// removed ("Bàn Đèn" -> "ban den"), so searching "ban" finds "bàn". It is a plain SQL
+// function over translate() rather than the unaccent extension: it needs no extension
+// privileges, is IMMUTABLE (usable in an index) and covers đ and every Vietnamese vowel
+// form. Keep the two lists in step with normalizeVi in FE_Flutter/lib/utils/text_normalize.dart.
+const unaccentFunctionSQL = `CREATE OR REPLACE FUNCTION f_unaccent_vi(text) RETURNS text AS $$
+	SELECT translate(lower($1), 'àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ', 'aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiiooooooooooooooooouuuuuuuuuuuyyyyyd')
+$$ LANGUAGE sql IMMUTABLE PARALLEL SAFE STRICT;`

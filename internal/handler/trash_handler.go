@@ -73,7 +73,12 @@ func (h *TrashHandler) Empty(c *gin.Context) {
 		SendError(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not authenticated", nil)
 		return
 	}
-	days, _ := strconv.Atoi(c.DefaultQuery("olderThanDays", "0"))
+	// A malformed value must not silently become 0, which empties the whole trash.
+	days, err := strconv.Atoi(c.DefaultQuery("olderThanDays", "0"))
+	if err != nil || days < 0 {
+		SendError(c, http.StatusBadRequest, "INVALID_INPUT", "olderThanDays must be a non-negative integer", nil)
+		return
+	}
 	n, err := h.trashService.Empty(userID, days)
 	if err != nil {
 		fail(c, "PURGE_FAILED", err)

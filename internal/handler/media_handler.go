@@ -18,7 +18,7 @@ func NewMediaHandler(mediaService service.MediaService) *MediaHandler {
 }
 
 func (h *MediaHandler) Upload(c *gin.Context) {
-	_, ok := middleware.GetCurrentUserID(c)
+	userID, ok := middleware.GetCurrentUserID(c)
 	if !ok {
 		SendError(c, http.StatusUnauthorized, "UNAUTHORIZED", "User not authenticated", nil)
 		return
@@ -35,9 +35,10 @@ func (h *MediaHandler) Upload(c *gin.Context) {
 
 	folder := c.DefaultPostForm("folder", "items")
 
-	res, err := h.mediaService.Upload(file, folder)
+	res, err := h.mediaService.Upload(userID, file, folder)
 	if err != nil {
-		SendError(c, http.StatusBadRequest, "UPLOAD_FAILED", err.Error(), nil)
+		// Validation messages are for the user; storage errors stay in the log.
+		fail(c, "UPLOAD_FAILED", err)
 		return
 	}
 

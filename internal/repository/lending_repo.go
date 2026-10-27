@@ -33,6 +33,8 @@ type LendingRepository interface {
 	// ListOverdue returns open loans whose expected return day is before today (YYYY-MM-DD, the user's local date).
 	ListOverdue(userID uuid.UUID, today string) ([]models.LendingRecord, error)
 	ListHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([]models.LendingRecord, error)
+	// ListReturned returns closed loans, newest return first, plus the total count.
+	ListReturned(userID uuid.UUID, page, limit int) ([]models.LendingRecord, int64, error)
 	CountActive(userID uuid.UUID) (int64, error)
 	CountOverdue(userID uuid.UUID, today string) (int64, error)
 }
@@ -218,6 +220,23 @@ func (r *lendingRepo) ListHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([
 		return nil, err
 	}
 	return records, nil
+}
+
+func (r *lendingRepo) ListReturned(userID uuid.UUID, page, limit int) ([]models.LendingRecord, int64, error) {
+	q := r.db.Model(&models.LendingRecord{}).Where("user_id = ? AND actual_return_date IS NOT NULL", userID)
+	var total int64
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	records := []models.LendingRecord{}
+	err := q.Order("actual_return_date DESC, id").Limit(limit).Offset((page - 1) * limit).Find(&records).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := r.populateItemInfo(userID, records); err != nil {
+		return nil, 0, err
+	}
+	return records, total, nil
 }
 
 func (r *lendingRepo) CountActive(userID uuid.UUID) (int64, error) {

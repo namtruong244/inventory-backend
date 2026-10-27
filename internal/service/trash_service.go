@@ -102,6 +102,10 @@ func (s *trashService) PurgeExpired(olderThanDays int) (int64, error) {
 		}
 		total += n
 		for _, f := range files {
+			if storage.BelongsToOther(f, uid) {
+				log.Printf("trash purge: skipping %s, it belongs to another user", f)
+				continue
+			}
 			if err := s.files.Delete(context.Background(), f); err != nil {
 				log.Printf("trash purge: could not remove %s: %v", f, err)
 			}

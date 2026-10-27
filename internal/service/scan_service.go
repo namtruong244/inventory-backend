@@ -1,8 +1,11 @@
 package service
 
 import (
+	"strings"
+
 	"inventory_backend/internal/apperr"
 
+	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
 
 	"github.com/google/uuid"
@@ -47,13 +50,13 @@ func NewScanService(boxRepo repository.BoxRepository, itemRepo repository.ItemRe
 }
 
 func (s *scanService) Lookup(userID uuid.UUID, code string) (*ScanLookupResult, error) {
+	// Scanners and pasted text often add a trailing newline or space.
+	code = strings.TrimSpace(code)
 	if code == "" {
 		return nil, apperr.Invalid("code parameter is required")
 	}
 
-	// 1. Check boxes by label
-	box, err := s.boxRepo.GetByLabel(code, &userID)
-	if err == nil && box != nil {
+	boxResult := func(box *models.Box) *ScanLookupResult {
 		itemCount, _ := s.boxRepo.CountItemsInBox(box.ID, userID)
 		return &ScanLookupResult{
 			Type: "box",
@@ -63,7 +66,13 @@ func (s *scanService) Lookup(userID uuid.UUID, code string) (*ScanLookupResult, 
 				Type:      box.Type,
 				ItemCount: int(itemCount),
 			},
-		}, nil
+		}
+	}
+
+	// 1. Check boxes by label
+	box, err := s.boxRepo.GetByLabel(code, &userID)
+	if err == nil && box != nil {
+		return boxResult(box), nil
 	}
 
 	// 2. Check items by barcode, serial_number, or ID
@@ -82,6 +91,13 @@ func (s *scanService) Lookup(userID uuid.UUID, code string) (*ScanLookupResult, 
 				IsLowStock: item.IsLowStock,
 			},
 		}, nil
+	}
+
+	// 3. A box QR code can carry the box id instead of its label
+	if boxID, perr := uuid.Parse(code); perr == nil {
+		if box, err := s.boxRepo.GetByID(boxID, userID); err == nil && box != nil {
+			return boxResult(box), nil
+		}
 	}
 
 	return nil, apperr.NotFound("no matching box or item found for the provided code")

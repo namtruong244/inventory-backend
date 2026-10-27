@@ -270,10 +270,15 @@ func (s *authService) LoginWithGoogle(email, name string, avatarURL *string, idT
 		// drop the password: nobody can keep using the pre-registered credentials.
 		user.PasswordHash = nil
 		user.Provider = "google"
-		// ...and any token issued to the pre-registrant dies with it.
-		user.TokenVersion++
 		if err := s.userRepo.Update(user); err != nil {
 			return nil, err
+		}
+		// ...and any token issued to the pre-registrant dies with it.
+		if err := s.userRepo.BumpTokenVersion(user.ID); err != nil {
+			return nil, err
+		}
+		if fresh, err := s.userRepo.GetByID(user.ID); err == nil && fresh != nil {
+			user = fresh
 		}
 	} else {
 		// New user
@@ -343,6 +348,11 @@ func (s *authService) DeleteAccount(userID uuid.UUID) error {
 	}
 	// The account is already gone; leftover files are only logged.
 	for _, f := range files {
+		// Only the user's own files go: a URL in another user's folder is not theirs to delete.
+		if storage.BelongsToOther(f, userID) {
+			log.Printf("account delete: skipping %s, it belongs to another user", f)
+			continue
+		}
 		if err := s.files.Delete(context.Background(), f); err != nil {
 			log.Printf("account delete: could not remove %s: %v", f, err)
 		}

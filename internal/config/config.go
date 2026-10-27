@@ -29,6 +29,18 @@ type Config struct {
 	UploadDir          string
 	CORSAllowedOrigins []string // empty: allow all in non-production, none in production
 
+	// TrustedProxies lists the proxies (IPs or CIDRs) whose X-Forwarded-For header
+	// is believed. Empty means none: the client IP is the connection's peer address,
+	// which on Lambda the API Gateway adapter fills in with the caller's source IP.
+	TrustedProxies []string
+
+	// OnLambda is true inside the AWS Lambda runtime. AppEnvSet and JWTSecretSet record
+	// whether those variables were provided, so Validate can refuse to start on Lambda
+	// with the development defaults.
+	OnLambda     bool
+	AppEnvSet    bool
+	JWTSecretSet bool
+
 	// Storage configuration
 	StorageDriver     string // "local" or "r2"
 	R2AccountID       string
@@ -81,6 +93,10 @@ func LoadConfig() *Config {
 		JWTExpirationHours: jwtExpHours,
 		UploadDir:          getEnv("UPLOAD_DIR", "./uploads"),
 		CORSAllowedOrigins: splitCSV(getEnv("CORS_ALLOWED_ORIGINS", "")),
+		TrustedProxies:     splitCSV(getEnv("TRUSTED_PROXIES", "")),
+		OnLambda:           os.Getenv("AWS_LAMBDA_FUNCTION_NAME") != "",
+		AppEnvSet:          getEnv("APP_ENV", "") != "",
+		JWTSecretSet:       getEnv("JWT_SECRET", "") != "",
 		StorageDriver:      getEnv("STORAGE_DRIVER", "local"),
 		R2AccountID:        getEnv("R2_ACCOUNT_ID", ""),
 		R2AccessKeyID:      getEnv("R2_ACCESS_KEY_ID", ""),
@@ -103,7 +119,17 @@ const (
 
 // Validate rejects configurations that are unsafe to run in production.
 func (c *Config) Validate() error {
-	if c.AppEnv != "production" {
+	if c.OnLambda {
+		// Lambda is always a deployed environment: never fall back to the development
+		// defaults (open CORS, known JWT secret) just because a variable is missing.
+		if !c.AppEnvSet {
+			return errors.New("APP_ENV must be set explicitly on Lambda")
+		}
+		if !c.JWTSecretSet {
+			return errors.New("JWT_SECRET must be set on Lambda")
+		}
+	}
+	if c.AppEnv != "production" && !c.OnLambda {
 		return nil
 	}
 	if c.JWTSecret == insecureDefaultJWTSecret || strings.Contains(c.JWTSecret, "change_in_production") {

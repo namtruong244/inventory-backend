@@ -15,9 +15,12 @@ type StockMovement struct {
 	Delta         float64   `gorm:"not null;default:0" json:"delta"`
 	QuantityAfter float64   `gorm:"not null;default:0" json:"quantityAfter"`
 	// Reason is one of the MovementReason* values.
-	Reason    string    `gorm:"size:30;not null" json:"reason"`
-	Note      string    `gorm:"type:text;default:''" json:"note"`
-	CreatedAt time.Time `gorm:"index:idx_movements_item_created,priority:2,sort:desc" json:"createdAt"`
+	Reason string `gorm:"size:30;not null" json:"reason"`
+	Note   string `gorm:"type:text;default:''" json:"note"`
+	// IdempotencyKey is set by clients that may replay a request (offline queue); a
+	// repeated key for the same user is applied only once.
+	IdempotencyKey string    `gorm:"size:64;default:''" json:"-"`
+	CreatedAt      time.Time `gorm:"index:idx_movements_item_created,priority:2,sort:desc" json:"createdAt"`
 }
 
 const (

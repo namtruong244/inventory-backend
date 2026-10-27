@@ -18,6 +18,11 @@ import (
 const LowStockCond = `min_quantity IS NOT NULL AND quantity + COALESCE((SELECT SUM(l.quantity) FROM lending_records l
 	WHERE l.item_id = items.id AND l.is_partial AND l.actual_return_date IS NULL), 0) <= min_quantity`
 
+// LowStockAlertCond is LowStockCond limited to items that are still around:
+// disposed, lost and broken items never raise low-stock alerts. The dashboard count,
+// the alert list and the isLowStock list filter all use it so their numbers agree.
+const LowStockAlertCond = `status NOT IN ('disposed', 'lost', 'broken') AND ` + LowStockCond
+
 type ItemFilter struct {
 	Q                 string
 	BoxID             *uuid.UUID
@@ -39,6 +44,8 @@ type QuantityChange struct {
 	Delta  *float64
 	Reason string
 	Note   string
+	// IdempotencyKey, when set, makes a repeated request a no-op that returns the item as is.
+	IdempotencyKey string
 }
 
 type ItemRepository interface {
@@ -112,23 +119,26 @@ func FillLent(db *gorm.DB, items []*models.Item) {
 
 func (r *itemRepo) GetByCode(code string, userID *uuid.UUID) (*models.Item, error) {
 	var item models.Item
-	query := r.db
-
-	if userID != nil {
-		query = query.Where("user_id = ?", *userID)
+	// Every lookup starts from a fresh query: a chained *gorm.DB would carry the id
+	// condition of the UUID attempt into the barcode attempt.
+	scoped := func() *gorm.DB {
+		q := r.db.Session(&gorm.Session{})
+		if userID != nil {
+			q = q.Where("user_id = ?", *userID)
+		}
+		return q
 	}
 
 	// Try UUID parse first
 	if parsedUUID, err := uuid.Parse(code); err == nil {
 		var uItem models.Item
-		uQuery := query.Where("id = ?", parsedUUID)
-		if err := uQuery.First(&uItem).Error; err == nil {
+		if err := scoped().Where("id = ?", parsedUUID).First(&uItem).Error; err == nil {
 			r.fillLent([]*models.Item{&uItem})
 			return &uItem, nil
 		}
 	}
 
-	err := query.Where("barcode = ? OR serial_number = ?", code, code).First(&item).Error
+	err := scoped().Where("barcode = ? OR serial_number = ?", code, code).First(&item).Error
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +154,8 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 
 	if filter.Q != "" {
 		searchTerm := "%" + escapeLike(filter.Q) + "%"
-		query = query.Where("(name ILIKE ? OR description ILIKE ? OR COALESCE(barcode, '') ILIKE ? OR COALESCE(serial_number, '') ILIKE ?)",
+		// Names and descriptions ignore case and Vietnamese diacritics ("ban" finds "bàn").
+		query = query.Where("(f_unaccent_vi(name) LIKE f_unaccent_vi(?) OR f_unaccent_vi(description) LIKE f_unaccent_vi(?) OR COALESCE(barcode, '') ILIKE ? OR COALESCE(serial_number, '') ILIKE ?)",
 			searchTerm, searchTerm, searchTerm, searchTerm)
 	}
 
@@ -161,7 +172,7 @@ func (r *itemRepo) List(userID uuid.UUID, filter ItemFilter) ([]models.Item, int
 	}
 
 	if filter.IsLowStock != nil && *filter.IsLowStock {
-		query = query.Where(LowStockCond)
+		query = query.Where(LowStockAlertCond)
 	}
 
 	nowStr := filter.Today
@@ -280,6 +291,17 @@ func (r *itemRepo) ChangeQuantity(id uuid.UUID, userID uuid.UUID, c QuantityChan
 			Where("id = ? AND user_id = ?", id, userID).First(&item).Error; err != nil {
 			return apperr.NotFoundOr(err, "item not found")
 		}
+		if c.IdempotencyKey != "" {
+			var seen int64
+			if err := tx.Model(&models.StockMovement{}).
+				Where("user_id = ? AND idempotency_key = ?", userID, c.IdempotencyKey).
+				Count(&seen).Error; err != nil {
+				return err
+			}
+			if seen > 0 {
+				return nil
+			}
+		}
 		next := item.Quantity
 		switch {
 		case c.Delta != nil:
@@ -300,7 +322,7 @@ func (r *itemRepo) ChangeQuantity(id uuid.UUID, userID uuid.UUID, c QuantityChan
 			return err
 		}
 		return tx.Create(&models.StockMovement{UserID: userID, ItemID: id, Delta: applied,
-			QuantityAfter: next, Reason: c.Reason, Note: c.Note}).Error
+			QuantityAfter: next, Reason: c.Reason, Note: c.Note, IdempotencyKey: c.IdempotencyKey}).Error
 	})
 	if err != nil {
 		return nil, 0, err

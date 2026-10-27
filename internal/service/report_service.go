@@ -91,7 +91,7 @@ func (s *reportService) GetInventoryHealth(userID uuid.UUID) (*InventoryHealthRe
 		Select(`COUNT(*) FILTER (WHERE status = 'stored') AS stored,
 			COUNT(*) FILTER (WHERE status = 'inUse') AS in_use,
 			COUNT(*) FILTER (WHERE status = 'lent') AS lent,
-			COUNT(*) FILTER (WHERE min_quantity IS NOT NULL AND quantity <= min_quantity) AS low_stock,
+			COUNT(*) FILTER (WHERE `+repository.LowStockAlertCond+`) AS low_stock,
 			COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date < @today) AS expired,
 			COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND expiry_date != '' AND expiry_date >= @today AND expiry_date <= @soon) AS expiring_soon`,
 			sql.Named("today", today), sql.Named("soon", soonDate)).

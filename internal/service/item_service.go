@@ -9,6 +9,7 @@ import (
 
 	"inventory_backend/internal/models"
 	"inventory_backend/internal/repository"
+	"inventory_backend/internal/storage"
 	"inventory_backend/internal/utils"
 
 	"github.com/google/uuid"
@@ -16,6 +17,29 @@ import (
 
 var validItemStatuses = map[string]bool{
 	"stored": true, "inUse": true, "lent": true, "broken": true, "disposed": true, "lost": true,
+}
+
+// checkPhotoOwnership rejects photo URLs that sit in another user's upload folder.
+// Without it a user could attach someone else's file to an item and later delete it
+// (or have it deleted) through that item. URLs already on the item are kept as they are,
+// and external links or files uploaded before per-user folders have no owner to check.
+func checkPhotoOwnership(userID uuid.UUID, field string, existing, incoming []string) error {
+	for _, u := range incoming {
+		if !storage.BelongsToOther(u, userID) {
+			continue
+		}
+		kept := false
+		for _, e := range existing {
+			if e == u {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			return apperr.Invalid(field + " contains a file that does not belong to you")
+		}
+	}
+	return nil
 }
 
 // normalizeDate accepts "YYYY-MM-DD" or an RFC3339 timestamp and stores only
@@ -51,7 +75,7 @@ type ItemService interface {
 	Move(userID uuid.UUID, id uuid.UUID, targetBoxID uuid.UUID) error
 	UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity float64, reason, note string) error
 	// AdjustQuantity adds delta (may be negative) atomically and returns the new quantity.
-	AdjustQuantity(userID uuid.UUID, id uuid.UUID, delta float64, reason, note string) (float64, error)
+	AdjustQuantity(userID uuid.UUID, id uuid.UUID, delta float64, reason, note, idempotencyKey string) (float64, error)
 	Movements(userID uuid.UUID, id uuid.UUID) (*MovementHistory, error)
 	Delete(userID uuid.UUID, id uuid.UUID) error
 }
@@ -164,6 +188,13 @@ func (s *itemService) Create(userID uuid.UUID, req CreateItemRequest) (*models.I
 
 	categoryName, err := s.resolveCategory(userID, req.CategoryID)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := checkPhotoOwnership(userID, "photos", nil, req.Photos); err != nil {
+		return nil, err
+	}
+	if err := checkPhotoOwnership(userID, "receiptPhotos", nil, req.ReceiptPhotos); err != nil {
 		return nil, err
 	}
 
@@ -417,9 +448,15 @@ func (s *itemService) Update(userID uuid.UUID, id uuid.UUID, req UpdateItemReque
 		item.ExpiryDate = d
 	}
 	if req.Photos != nil {
+		if err := checkPhotoOwnership(userID, "photos", item.Photos, req.Photos); err != nil {
+			return nil, err
+		}
 		item.Photos = req.Photos
 	}
 	if req.ReceiptPhotos != nil {
+		if err := checkPhotoOwnership(userID, "receiptPhotos", item.ReceiptPhotos, req.ReceiptPhotos); err != nil {
+			return nil, err
+		}
 		item.ReceiptPhotos = req.ReceiptPhotos
 	}
 	if req.CustomAttributes != nil {
@@ -469,12 +506,15 @@ func (s *itemService) UpdateQuantity(userID uuid.UUID, id uuid.UUID, quantity fl
 	return err
 }
 
-func (s *itemService) AdjustQuantity(userID uuid.UUID, id uuid.UUID, delta float64, reason, note string) (float64, error) {
+func (s *itemService) AdjustQuantity(userID uuid.UUID, id uuid.UUID, delta float64, reason, note, idempotencyKey string) (float64, error) {
 	reason, err := checkMovementReason(reason)
 	if err != nil {
 		return 0, err
 	}
-	item, _, err := s.itemRepo.ChangeQuantity(id, userID, repository.QuantityChange{Delta: &delta, Reason: reason, Note: note})
+	if len(idempotencyKey) > 64 {
+		return 0, apperr.Invalid("idempotencyKey must be at most 64 characters")
+	}
+	item, _, err := s.itemRepo.ChangeQuantity(id, userID, repository.QuantityChange{Delta: &delta, Reason: reason, Note: note, IdempotencyKey: idempotencyKey})
 	if err != nil {
 		return 0, err
 	}

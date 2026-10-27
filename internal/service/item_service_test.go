@@ -183,3 +183,39 @@ func TestItemService_UpdateQuantityRecordsMovement(t *testing.T) {
 		t.Fatal("other user must not read movements")
 	}
 }
+
+func TestItemService_PhotoOwnership(t *testing.T) {
+	svc, userID, boxID := setupItemSvc(t)
+	other := uuid.New()
+	mine := "https://cdn.example/uploads/items/" + userID.String() + "/a.jpg"
+	theirs := "https://cdn.example/uploads/items/" + other.String() + "/b.jpg"
+	legacy := "https://cdn.example/uploads/items/c0ffee00-0000-4000-8000-000000000000.jpg"
+	external := "https://images.unsplash.com/photo-1?w=800"
+
+	req := service.CreateItemRequest{Name: "n", BoxID: boxID, CategoryID: "c", Unit: ptr("pcs")}
+
+	bad := req
+	bad.Photos = []string{mine, theirs}
+	if _, err := svc.Create(userID, bad); !isInvalid(err) {
+		t.Errorf("another user's file must be rejected on create, got %v", err)
+	}
+	badReceipt := req
+	badReceipt.ReceiptPhotos = []string{theirs}
+	if _, err := svc.Create(userID, badReceipt); !isInvalid(err) {
+		t.Errorf("another user's receipt must be rejected on create, got %v", err)
+	}
+
+	ok := req
+	ok.Photos = []string{mine, legacy, external}
+	item, err := svc.Create(userID, ok)
+	if err != nil {
+		t.Fatalf("own, legacy and external photos are fine: %v", err)
+	}
+
+	if _, err := svc.Update(userID, item.ID, service.UpdateItemRequest{Photos: []string{mine, theirs}}); !isInvalid(err) {
+		t.Errorf("attaching another user's file on update must be rejected, got %v", err)
+	}
+	if _, err := svc.Update(userID, item.ID, service.UpdateItemRequest{Photos: []string{legacy, mine, external, mine}}); err != nil {
+		t.Errorf("re-sending the item's own photos must work: %v", err)
+	}
+}

@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"inventory_backend/internal/service"
+	"inventory_backend/internal/storage"
+
+	"github.com/google/uuid"
 )
 
 type fakeStorage struct{ uploaded int }
@@ -62,7 +65,7 @@ func TestMediaService_Upload(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := &fakeStorage{}
 			svc := service.NewMediaService(st)
-			_, err := svc.Upload(fileHeader(t, tc.file, tc.content), "items")
+			_, err := svc.Upload(uuid.New(), fileHeader(t, tc.file, tc.content), "items")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("wantErr=%v, got err=%v", tc.wantErr, err)
 			}
@@ -70,5 +73,19 @@ func TestMediaService_Upload(t *testing.T) {
 				t.Errorf("rejected file must not reach storage")
 			}
 		})
+	}
+}
+
+func TestMediaService_UploadsIntoTheUsersOwnFolder(t *testing.T) {
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 64)...)
+	st := &fakeStorage{}
+	user := uuid.New()
+	res, err := service.NewMediaService(st).Upload(user, fileHeader(t, "a.png", png), "receipts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, ok := storage.OwnerOf(res.URL)
+	if !ok || owner != user {
+		t.Errorf("url %q should belong to %s, got %s (ok=%v)", res.URL, user, owner, ok)
 	}
 }

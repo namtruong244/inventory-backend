@@ -3,8 +3,11 @@ package app_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sync"
 	"testing"
@@ -13,9 +16,12 @@ import (
 	"inventory_backend/internal/app"
 	"inventory_backend/internal/config"
 	"inventory_backend/internal/database"
+	"inventory_backend/internal/models"
+	"inventory_backend/internal/repository"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // These tests need a real PostgreSQL. They run only when INTEGRATION_DB_NAME is
@@ -48,6 +54,17 @@ func (c *client) do(method, path string, body any) (int, map[string]any) {
 
 func (c *client) data() map[string]any { return nil }
 
+func newDB(t *testing.T, cfg *config.Config) *gorm.DB {
+	t.Helper()
+	cfg.DBName = os.Getenv("INTEGRATION_DB_NAME")
+	cfg.RunMigrations = true
+	db, err := database.InitDB(cfg)
+	if err != nil {
+		t.Fatalf("init db: %v", err)
+	}
+	return db
+}
+
 func newRouter(t *testing.T) *gin.Engine {
 	name := os.Getenv("INTEGRATION_DB_NAME")
 	if name == "" {
@@ -55,12 +72,8 @@ func newRouter(t *testing.T) *gin.Engine {
 	}
 	gin.SetMode(gin.TestMode)
 	cfg := config.LoadConfig()
-	cfg.DBName = name
-	cfg.RunMigrations = true
-	db, err := database.InitDB(cfg)
-	if err != nil {
-		t.Fatalf("init db: %v", err)
-	}
+	cfg.UploadDir = t.TempDir()
+	db := newDB(t, cfg)
 	r, err := app.SetupRouter(cfg, db)
 	if err != nil {
 		t.Fatalf("router: %v", err)
@@ -544,5 +557,277 @@ func TestIntegration_LendWithForeignIDConflicts(t *testing.T) {
 	}
 	if code, _ := b.do("POST", "/lending/lend", map[string]any{"id": shared, "itemId": itemB, "borrowerName": "y"}); code != http.StatusConflict {
 		t.Errorf("foreign id reuse = %d, want 409", code)
+	}
+}
+
+func TestIntegration_ScanTrimsCodeAndFindsBoxByID(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "sc-"+suffix+"@example.com")
+	boxID, itemID := setupItem(t, a, suffix, map[string]any{"barcode": uuid.NewString()})
+
+	_, o := a.do("GET", "/items/"+itemID, nil)
+	barcode := o["data"].(map[string]any)["barcode"].(string)
+
+	look := func(code string) (int, map[string]any) {
+		return a.do("GET", "/scan/lookup?code="+url.QueryEscape(code), nil)
+	}
+	// A barcode that looks like a UUID but is not an item id must still be found.
+	if code, out := look(barcode); code != http.StatusOK || out["data"].(map[string]any)["type"] != "item" {
+		t.Errorf("uuid-shaped barcode lookup: %d %v", code, out)
+	}
+	// Surrounding whitespace from a scanner is ignored.
+	if code, out := look(" B-" + suffix + "\n"); code != http.StatusOK || out["data"].(map[string]any)["type"] != "box" {
+		t.Errorf("padded label lookup: %d %v", code, out)
+	}
+	// A box QR code may carry the box id.
+	if code, out := look(boxID); code != http.StatusOK || out["data"].(map[string]any)["type"] != "box" {
+		t.Errorf("box id lookup: %d %v", code, out)
+	}
+	if code, _ := look(uuid.NewString()); code != http.StatusNotFound {
+		t.Errorf("unknown code = %d, want 404", code)
+	}
+}
+
+func TestIntegration_CascadeDeleteBlockedByPartialLoan(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "cd-"+suffix+"@example.com")
+	boxID, itemID := setupItem(t, a, suffix, nil)
+	if code, o := a.do("POST", "/lending/lend", map[string]any{"itemId": itemID, "borrowerName": "bob", "quantity": 3}); code != http.StatusCreated {
+		t.Fatalf("lend: %d %v", code, o)
+	}
+	// The item is still 'stored' but 3 units are out: the box must not be deletable.
+	if code, _ := a.do("DELETE", "/boxes/"+boxID+"?cascade=true", nil); code != http.StatusConflict {
+		t.Errorf("cascade delete with a partial loan = %d, want 409", code)
+	}
+	// Without cascade an occupied box is refused as before.
+	if code, _ := a.do("DELETE", "/boxes/"+boxID, nil); code != http.StatusConflict {
+		t.Errorf("plain delete of an occupied box = %d, want 409", code)
+	}
+	_, o := a.do("GET", "/lending/active", nil)
+	loan := o["data"].([]any)[0].(map[string]any)["id"].(string)
+	a.do("POST", "/lending/"+loan+"/return", map[string]any{})
+	if code, _ := a.do("DELETE", "/boxes/"+boxID+"?cascade=true", nil); code != http.StatusOK {
+		t.Errorf("cascade delete after return = %d, want 200", code)
+	}
+}
+
+func TestIntegration_TrashEmptyRejectsBadDays(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "te-"+suffix+"@example.com")
+	_, itemID := setupItem(t, a, suffix, nil)
+	a.do("DELETE", "/items/"+itemID, nil)
+
+	for _, bad := range []string{"abc", "-1", "1.5"} {
+		if code, _ := a.do("DELETE", "/trash?olderThanDays="+bad, nil); code != http.StatusBadRequest {
+			t.Errorf("olderThanDays=%s = %d, want 400", bad, code)
+		}
+	}
+	// The malformed requests must not have emptied the trash.
+	_, o := a.do("GET", "/trash", nil)
+	if items := o["data"].(map[string]any)["items"].([]any); len(items) != 1 {
+		t.Errorf("trash items = %d, want 1", len(items))
+	}
+}
+
+func TestIntegration_LoginRateLimitIgnoresSpoofedForwardedFor(t *testing.T) {
+	r := newRouter(t)
+	limited := false
+	for i := 0; i < 40; i++ {
+		body, _ := json.Marshal(map[string]any{"email": "nobody@example.com", "password": "wrong-password"})
+		req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// A different fake client address on every attempt.
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.9.%d.%d", i/200, i%200+1))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("rotating X-Forwarded-For must not escape the login rate limit")
+	}
+}
+
+func (c *client) upload(name string, content []byte) (int, map[string]any) {
+	c.t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, _ := w.CreateFormFile("file", name)
+	part.Write(content)
+	w.Close()
+	req := httptest.NewRequest("POST", "/api/v1/media/upload", &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	rec := httptest.NewRecorder()
+	c.router.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+func TestIntegration_UploadedPhotosBelongToTheirUploader(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "ph-a-"+suffix+"@example.com")
+	b := register(t, r, "ph-b-"+suffix+"@example.com")
+	boxA, _ := setupItem(t, a, "a"+suffix, nil)
+	boxB, _ := setupItem(t, b, "b"+suffix, nil)
+
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 64)...)
+	code, out := a.upload("a.png", png)
+	if code != http.StatusOK {
+		t.Fatalf("upload: %d %v", code, out)
+	}
+	photo := out["data"].(map[string]any)["url"].(string)
+
+	item := func(c *client, box string) int {
+		code, _ := c.do("POST", "/items", map[string]any{"name": "P", "boxId": box, "categoryId": "Tools & Hardware", "photos": []string{photo}})
+		return code
+	}
+	if code := item(a, boxA); code != http.StatusCreated {
+		t.Errorf("the uploader can attach their own photo, got %d", code)
+	}
+	if code := item(b, boxB); code != http.StatusBadRequest {
+		t.Errorf("another user attaching that photo = %d, want 400", code)
+	}
+	if code, _ := a.upload("a.svg", []byte("<svg/>")); code != http.StatusBadRequest {
+		t.Errorf("a rejected upload is a 400, got %d", code)
+	}
+}
+
+func TestIntegration_UserUpdateKeepsTokenVersion(t *testing.T) {
+	newRouter(t) // skips when no database is configured
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	cfg := config.LoadConfig()
+	db := newDB(t, cfg)
+	users := repository.NewUserRepository(db)
+
+	u := &models.User{Name: "tv", Email: "tv-" + suffix + "@example.com"}
+	if err := users.Create(u); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := users.GetByID(u.ID)                      // profile edit reads the user here...
+	if err := users.BumpTokenVersion(u.ID); err != nil { // ...logout-all runs meanwhile...
+		t.Fatal(err)
+	}
+	stale.Name = "renamed"
+	if err := users.Update(stale); err != nil { // ...and the edit saves the old row.
+		t.Fatal(err)
+	}
+	got, _ := users.GetByID(u.ID)
+	if got.TokenVersion != 1 {
+		t.Errorf("token_version = %d, want 1: a profile update must not revive revoked tokens", got.TokenVersion)
+	}
+	if got.Name != "renamed" {
+		t.Errorf("name = %q, the update itself must still apply", got.Name)
+	}
+}
+
+func TestIntegration_SearchIgnoresVietnameseDiacritics(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "vi-"+suffix+"@example.com")
+	boxID, _ := setupItem(t, a, suffix, nil)
+	for _, name := range []string{"Bàn làm việc", "Đèn ngủ", "Ghế sofa", "100% cotton"} {
+		if code, o := a.do("POST", "/items", map[string]any{"name": name, "boxId": boxID, "categoryId": "Tools & Hardware"}); code != http.StatusCreated {
+			t.Fatalf("create %q: %d %v", name, code, o)
+		}
+	}
+	names := func(q string) []string {
+		_, o := a.do("GET", "/items?q="+url.QueryEscape(q), nil)
+		var out []string
+		for _, it := range o["data"].([]any) {
+			out = append(out, it.(map[string]any)["name"].(string))
+		}
+		return out
+	}
+	cases := map[string]string{
+		"ban":      "Bàn làm việc", // plain letters find accented text
+		"BÀN":      "Bàn làm việc", // accents and case in the query are ignored too
+		"den":      "Đèn ngủ",      // đ -> d
+		"đèn":      "Đèn ngủ",
+		"ghe":      "Ghế sofa",
+		"lam viec": "Bàn làm việc",
+		"100%":     "100% cotton", // LIKE wildcards in the query stay literal
+	}
+	for q, want := range cases {
+		if got := names(q); len(got) != 1 || got[0] != want {
+			t.Errorf("q=%q -> %v, want [%s]", q, got, want)
+		}
+	}
+	if got := names("%"); len(got) != 1 {
+		t.Errorf("a lone %% must only match literal percent signs, got %v", got)
+	}
+}
+
+func TestIntegration_QuantityDeltaIdempotencyKey(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "qk-"+suffix+"@example.com")
+	b := register(t, r, "qk2-"+suffix+"@example.com")
+	_, itemID := setupItem(t, a, suffix, nil)
+	_, otherItem := setupItem(t, b, suffix+"b", nil)
+
+	body := map[string]any{"delta": -3, "reason": "consume", "idempotencyKey": "op-1"}
+	for i := 0; i < 3; i++ { // the offline queue may replay the same request
+		if code, out := a.do("PATCH", "/items/"+itemID+"/quantity", body); code != http.StatusOK {
+			t.Fatalf("replay %d: %d %v", i, code, out)
+		}
+	}
+	qty := func(c *client, id string) float64 {
+		_, out := c.do("GET", "/items/"+id, nil)
+		return out["data"].(map[string]any)["quantity"].(float64)
+	}
+	if got := qty(a, itemID); got != 7 {
+		t.Errorf("quantity after replayed delta = %v, want 7", got)
+	}
+	// Same key, different user: independent.
+	if code, _ := b.do("PATCH", "/items/"+otherItem+"/quantity", body); code != http.StatusOK {
+		t.Fatalf("other user: %d", code)
+	}
+	if got := qty(b, otherItem); got != 7 {
+		t.Errorf("other user quantity = %v, want 7", got)
+	}
+	// A new key applies again.
+	body["idempotencyKey"] = "op-2"
+	a.do("PATCH", "/items/"+itemID+"/quantity", body)
+	if got := qty(a, itemID); got != 4 {
+		t.Errorf("quantity after second key = %v, want 4", got)
+	}
+}
+
+func TestIntegration_ReturnedLoansHistoryIsPaginated(t *testing.T) {
+	r := newRouter(t)
+	suffix := t.Name() + "-" + os.Getenv("INTEGRATION_RUN")
+	a := register(t, r, "rh-"+suffix+"@example.com")
+	b := register(t, r, "rh2-"+suffix+"@example.com")
+	_, itemID := setupItem(t, a, suffix, nil)
+	for i := 0; i < 3; i++ {
+		code, out := a.do("POST", "/lending/lend", map[string]any{"itemId": itemID, "borrowerName": "bob"})
+		if code != http.StatusCreated {
+			t.Fatalf("lend %d: %d %v", i, code, out)
+		}
+		if code, out := a.do("POST", "/lending/"+id(out)+"/return", nil); code != http.StatusOK {
+			t.Fatalf("return %d: %d %v", i, code, out)
+		}
+	}
+	code, out := a.do("GET", "/lending/history?limit=2", nil)
+	if code != http.StatusOK {
+		t.Fatalf("history: %d %v", code, out)
+	}
+	if n := len(out["data"].([]any)); n != 2 {
+		t.Errorf("page size = %d, want 2", n)
+	}
+	if total := out["meta"].(map[string]any)["total"].(float64); total != 3 {
+		t.Errorf("total = %v, want 3", total)
+	}
+	_, out = b.do("GET", "/lending/history", nil)
+	if n := len(out["data"].([]any)); n != 0 {
+		t.Errorf("other user sees %d loans, want 0", n)
 	}
 }

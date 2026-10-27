@@ -49,8 +49,13 @@ func (r *userRepo) GetByID(id uuid.UUID) (*models.User, error) {
 	return &user, nil
 }
 
+// Update writes the profile and credential columns only. token_version is left out on
+// purpose: it changes through BumpTokenVersion, and a read-modify-write of the whole row
+// here could put back an old value and revive tokens that logout-all just revoked.
 func (r *userRepo) Update(user *models.User) error {
-	return r.db.Save(user).Error
+	return r.db.Model(user).
+		Select("name", "email", "password_hash", "provider", "provider_id", "role", "avatar_url", "updated_at").
+		Updates(user).Error
 }
 
 func (r *userRepo) BumpTokenVersion(id uuid.UUID) error {

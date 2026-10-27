@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -10,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"inventory_backend/internal/apperr"
 	"inventory_backend/internal/storage"
 
 	"github.com/google/uuid"
@@ -19,8 +19,8 @@ import (
 const MaxUploadSize = 10 << 20
 
 type MediaService interface {
-	Upload(file *multipart.FileHeader, folder string) (*MediaUploadResponse, error)
-	UploadWithContext(ctx context.Context, file *multipart.FileHeader, folder string) (*MediaUploadResponse, error)
+	Upload(userID uuid.UUID, file *multipart.FileHeader, folder string) (*MediaUploadResponse, error)
+	UploadWithContext(ctx context.Context, userID uuid.UUID, file *multipart.FileHeader, folder string) (*MediaUploadResponse, error)
 }
 
 type MediaUploadResponse struct {
@@ -35,11 +35,14 @@ func NewMediaService(storageProvider storage.StorageProvider) MediaService {
 	return &mediaService{storageProvider: storageProvider}
 }
 
-func (s *mediaService) Upload(file *multipart.FileHeader, folder string) (*MediaUploadResponse, error) {
-	return s.UploadWithContext(context.Background(), file, folder)
+func (s *mediaService) Upload(userID uuid.UUID, file *multipart.FileHeader, folder string) (*MediaUploadResponse, error) {
+	return s.UploadWithContext(context.Background(), userID, file, folder)
 }
 
-func (s *mediaService) UploadWithContext(ctx context.Context, file *multipart.FileHeader, folder string) (*MediaUploadResponse, error) {
+// UploadWithContext stores the file under the uploader's own folder, so the URL
+// proves ownership (see storage.OwnerOf). Validation failures are apperr.Invalid
+// (safe to show); anything else is an internal error the handler must not echo.
+func (s *mediaService) UploadWithContext(ctx context.Context, userID uuid.UUID, file *multipart.FileHeader, folder string) (*MediaUploadResponse, error) {
 	if folder != "items" && folder != "receipts" {
 		folder = "items"
 	}
@@ -57,11 +60,11 @@ func (s *mediaService) UploadWithContext(ctx context.Context, file *multipart.Fi
 
 	defaultMime, allowed := allowedExtensions[ext]
 	if !allowed {
-		return nil, errors.New("unsupported file extension (allowed: jpg, jpeg, png, webp, gif, heic, pdf)")
+		return nil, apperr.Invalid("unsupported file extension (allowed: jpg, jpeg, png, webp, gif, heic, pdf)")
 	}
 
 	if file.Size > MaxUploadSize {
-		return nil, fmt.Errorf("file is too large (max %d MB)", MaxUploadSize>>20)
+		return nil, apperr.Invalid(fmt.Sprintf("file is too large (max %d MB)", MaxUploadSize>>20))
 	}
 
 	src, err := file.Open()
@@ -78,7 +81,7 @@ func (s *mediaService) UploadWithContext(ctx context.Context, file *multipart.Fi
 	}
 	head = head[:n]
 	if !contentMatchesExtension(head, ext) {
-		return nil, errors.New("file content does not match its extension")
+		return nil, apperr.Invalid("file content does not match its extension")
 	}
 	contentType := defaultMime
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
@@ -87,7 +90,7 @@ func (s *mediaService) UploadWithContext(ctx context.Context, file *multipart.Fi
 
 	uniqueFilename := uuid.New().String() + ext
 
-	fileURL, err := s.storageProvider.Upload(ctx, src, uniqueFilename, contentType, folder)
+	fileURL, err := s.storageProvider.Upload(ctx, src, uniqueFilename, contentType, storage.UserFolder(folder, userID))
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload media: %w", err)
 	}

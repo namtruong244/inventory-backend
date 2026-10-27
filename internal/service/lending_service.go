@@ -18,6 +18,8 @@ type LendingService interface {
 	GetActiveLoans(userID uuid.UUID) ([]models.LendingRecord, error)
 	GetOverdueLoans(userID uuid.UUID) ([]models.LendingRecord, error)
 	GetHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([]models.LendingRecord, error)
+	// GetReturnedLoans lists closed loans of every item, newest return first (paginated).
+	GetReturnedLoans(userID uuid.UUID, page, limit int) ([]models.LendingRecord, int64, error)
 }
 
 type LendItemRequest struct {
@@ -142,6 +144,10 @@ func (s *lendingService) GetActiveLoans(userID uuid.UUID) ([]models.LendingRecor
 
 func (s *lendingService) GetOverdueLoans(userID uuid.UUID) ([]models.LendingRecord, error) {
 	return s.lendingRepo.ListOverdue(userID, todayFor(s.settingsRepo, userID))
+}
+
+func (s *lendingService) GetReturnedLoans(userID uuid.UUID, page, limit int) ([]models.LendingRecord, int64, error) {
+	return s.lendingRepo.ListReturned(userID, page, limit)
 }
 
 func (s *lendingService) GetHistoryByItemID(userID uuid.UUID, itemID uuid.UUID) ([]models.LendingRecord, error) {

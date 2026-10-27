@@ -35,6 +35,9 @@ type UpdateQuantityRequest struct {
 	// Reason: restock, consume, damaged, lost, correction or adjust (default).
 	Reason string `json:"reason"`
 	Note   string `json:"note"`
+	// IdempotencyKey (delta only): a repeated key is applied once, so a replayed request
+	// does not add the delta twice.
+	IdempotencyKey string `json:"idempotencyKey"`
 }
 
 func (h *ItemHandler) List(c *gin.Context) {
@@ -229,7 +232,7 @@ func (h *ItemHandler) UpdateQuantity(c *gin.Context) {
 	}
 
 	if req.Delta != nil {
-		qty, err := h.itemService.AdjustQuantity(userID, id, *req.Delta, req.Reason, req.Note)
+		qty, err := h.itemService.AdjustQuantity(userID, id, *req.Delta, req.Reason, req.Note, req.IdempotencyKey)
 		if err != nil {
 			fail(c, "UPDATE_QUANTITY_FAILED", err)
 			return

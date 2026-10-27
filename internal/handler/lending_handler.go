@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	"inventory_backend/internal/middleware"
 	"inventory_backend/internal/service"
@@ -103,7 +104,24 @@ func (h *LendingHandler) History(c *gin.Context) {
 
 	itemIDStr := c.Query("itemId")
 	if itemIDStr == "" {
-		SendError(c, http.StatusBadRequest, "INVALID_INPUT", "itemId query parameter is required", nil)
+		// No item: every closed loan, newest first, paginated.
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		if limit < 1 {
+			limit = 50
+		}
+		if limit > maxPageLimit {
+			limit = maxPageLimit
+		}
+		records, total, err := h.lendingService.GetReturnedLoans(userID, page, limit)
+		if err != nil {
+			fail(c, "HISTORY_FAILED", err)
+			return
+		}
+		SendSuccessWithMeta(c, http.StatusOK, records, &Meta{Page: page, Limit: limit, Total: total}, "")
 		return
 	}
 

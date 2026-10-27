@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type BoxRepository interface {
@@ -140,26 +141,29 @@ func (r *boxRepo) CountsByBox(userID uuid.UUID) (map[uuid.UUID]int64, map[uuid.U
 }
 
 func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
-	// Ownership must be verified first: every later query is scoped to this user too.
-	if _, err := r.GetByID(id, userID); err != nil {
-		return err
-	}
-
-	itemCount, err := r.CountItemsInBox(id, userID)
-	if err != nil {
-		return err
-	}
-	subBoxCount, err := r.CountSubBoxesInBox(id, userID)
-	if err != nil {
-		return err
-	}
-
-	if !cascade && (itemCount > 0 || subBoxCount > 0) {
-		return apperr.Conflict("cannot delete box because it contains items or sub-boxes (use cascade=true)")
-	}
-
 	deletedAt := time.Now().UTC()
+	// Ownership, the emptiness check and the delete share one transaction, so
+	// nothing can be added to the box between the check and the delete.
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		var box models.Box
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND user_id = ?", id, userID).First(&box).Error; err != nil {
+			return apperr.NotFoundOr(err, "box not found")
+		}
+
+		var itemCount, subBoxCount int64
+		if err := tx.Model(&models.Item{}).Where("box_id = ? AND user_id = ?", id, userID).
+			Count(&itemCount).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&models.Box{}).Where("parent_id = ? AND user_id = ?", id, userID).
+			Count(&subBoxCount).Error; err != nil {
+			return err
+		}
+		if !cascade && (itemCount > 0 || subBoxCount > 0) {
+			return apperr.Conflict("cannot delete box because it contains items or sub-boxes (use cascade=true)")
+		}
+
 		if cascade {
 			// Find all descendant box IDs recursively
 			var descendantIDs []uuid.UUID
@@ -177,9 +181,13 @@ func (r *boxRepo) Delete(id uuid.UUID, userID uuid.UUID, cascade bool) error {
 
 			allBoxIDs := append(descendantIDs, id)
 
+			// Fully lent items have status 'lent'; a partial loan leaves the item
+			// 'stored' and is only visible as an open lending record.
 			var lentCount int64
 			if err := tx.Model(&models.Item{}).
-				Where("box_id IN ? AND user_id = ? AND status = 'lent'", allBoxIDs, userID).
+				Where(`box_id IN ? AND user_id = ? AND (status = 'lent' OR EXISTS (
+					SELECT 1 FROM lending_records l
+					WHERE l.item_id = items.id AND l.actual_return_date IS NULL))`, allBoxIDs, userID).
 				Count(&lentCount).Error; err != nil {
 				return err
 			}

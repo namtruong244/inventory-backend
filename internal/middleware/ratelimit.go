@@ -80,6 +80,21 @@ func (l *RateLimiter) Middleware() gin.HandlerFunc {
 	}
 }
 
+// PerUser limits requests per authenticated user. Mount it after the auth middleware.
+func (l *RateLimiter) PerUser() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.ClientIP()
+		if id, ok := GetCurrentUserID(c); ok {
+			key = id.String()
+		}
+		if !l.Allow(key) {
+			Reject(c)
+			return
+		}
+		c.Next()
+	}
+}
+
 // Reject aborts the request with 429 RATE_LIMITED.
 func Reject(c *gin.Context) {
 	response.SendError(c, http.StatusTooManyRequests, "RATE_LIMITED", "Too many attempts, please try again later", nil)
