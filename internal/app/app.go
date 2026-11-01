@@ -122,8 +122,12 @@ func SetupRouter(cfg *config.Config, db *gorm.DB) (*gin.Engine, error) {
 	{
 		// Public Authentication Routes
 		authGroup := v1.Group("/auth")
-		// 30 login/register attempts per IP per 15 minutes.
-		authGroup.Use(middleware.NewRateLimiter(30, 15*time.Minute).Middleware())
+		// 30 (AUTH_RATE_LIMIT) login/register attempts per IP per 15 minutes.
+		authRateLimit := cfg.AuthRateLimit
+		if authRateLimit < 1 {
+			authRateLimit = 30
+		}
+		authGroup.Use(middleware.NewRateLimiter(authRateLimit, 15*time.Minute).Middleware())
 		{
 			authGroup.POST("/register", authHandler.Register)
 			authGroup.POST("/login", authHandler.Login)

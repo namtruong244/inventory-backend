@@ -12,18 +12,20 @@ import (
 )
 
 type Config struct {
-	Port               string
-	AppEnv             string
-	BaseURL            string
-	DBHost             string
-	DBPort             string
-	DBUser             string
-	DBPassword         string
-	DBName             string
-	DBSSLMode          string
-	DBMaxOpenConns     int
-	DBMaxIdleConns     int
-	RunMigrations      bool
+	Port           string
+	AppEnv         string
+	BaseURL        string
+	DBHost         string
+	DBPort         string
+	DBUser         string
+	DBPassword     string
+	DBName         string
+	DBSSLMode      string
+	DBMaxOpenConns int
+	DBMaxIdleConns int
+	RunMigrations  bool
+	// AuthRateLimit is the public /auth/* limit per IP per 15 minutes (E2E runs raise it).
+	AuthRateLimit      int
 	JWTSecret          string
 	JWTExpirationHours int
 	UploadDir          string
@@ -74,9 +76,15 @@ func LoadConfig() *Config {
 		dbMaxIdleConns = 5
 	}
 
+	authRateLimit, err := strconv.Atoi(getEnv("AUTH_RATE_LIMIT", "30"))
+	if err != nil || authRateLimit < 1 {
+		authRateLimit = 30
+	}
+
 	runMigrations := getEnvAsBool("RUN_MIGRATIONS", true)
 
 	cfg := &Config{
+		AuthRateLimit:      authRateLimit,
 		Port:               getEnv("PORT", "8080"),
 		AppEnv:             getEnv("APP_ENV", "development"),
 		BaseURL:            getEnv("BASE_URL", "http://localhost:8080"),
