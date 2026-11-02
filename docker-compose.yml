@@ -36,7 +36,9 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       DB_NAME: ${DB_NAME:-inventory_db}
       DB_SSLMODE: disable
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set (min 32 chars)}
+      # Không dùng ${JWT_SECRET:?} ở đây: compose nội suy cả file nên sẽ chặn luôn `make db-up`.
+      # APP_ENV=production nên config.Validate() tự từ chối secret trống/mặc định/< 32 ký tự lúc khởi động.
+      JWT_SECRET: ${JWT_SECRET:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       JWT_EXPIRATION_HOURS: 720
       UPLOAD_DIR: ./uploads

@@ -216,6 +216,9 @@ Mỗi khi bạn push code lên nhánh `main` (hoặc nhấn **Run workflow** th�
 
 ### Cách 1: Chạy trực tiếp (Local DB Docker)
 ```bash
+# 0. (Tuỳ chọn) cấu hình riêng; không có .env thì dùng mặc định dev
+cp .env.example .env
+
 # 1. Khởi động DB
 make db-up
 
@@ -226,6 +229,7 @@ API lắng nghe tại `http://localhost:8080`.
 
 ### Cách 2: Chạy toàn bộ qua Docker Compose
 ```bash
+cp .env.example .env   # container api chạy APP_ENV=production: bắt buộc JWT_SECRET >= 32 ký tự
 make docker-up
 ```
 
